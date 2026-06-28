@@ -1,8 +1,7 @@
-import os, re, io, zipfile, datetime
+import os, re, io, zipfile, datetime, tempfile, subprocess
 from flask import Flask, render_template, request, send_file, jsonify
 import openpyxl
 import pytesseract
-from pdf2image import convert_from_bytes
 from PIL import Image
 
 app = Flask(__name__, template_folder=".")
@@ -118,11 +117,26 @@ def leer_reporte(file, shipment):
 # ─────────────────────────────────────────────
 
 def ocr_pdf(pdf_bytes):
-    """Convierte PDF a texto via pytesseract."""
-    images = convert_from_bytes(pdf_bytes, dpi=150)
-    texto = ''
-    for img in images[:2]:  # solo primeras 2 páginas
-        texto += pytesseract.image_to_string(img, lang='spa') + '\n'
+    """Convierte PDF a texto via pdftoppm + pytesseract, página por página."""
+    texto = ''''''
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pdf_path = os.path.join(tmpdir, 'input.pdf')
+        with open(pdf_path, 'wb') as f:
+            f.write(pdf_bytes)
+        out_prefix = os.path.join(tmpdir, 'page')
+        subprocess.run(
+            ['pdftoppm', '-r', '150', '-l', '1', '-jpeg', pdf_path, out_prefix],
+            check=True, capture_output=True
+        )
+        archivos = sorted([
+            f for f in os.listdir(tmpdir)
+            if f.startswith('page') and f.endswith('.jpg')
+        ])
+        for nombre in archivos:
+            img_path = os.path.join(tmpdir, nombre)
+            img = Image.open(img_path)
+            texto += pytesseract.image_to_string(img, lang='spa') + '\n'
+            img.close()
     return texto
 
 
