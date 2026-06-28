@@ -119,7 +119,7 @@ def leer_reporte(file, shipment):
 
 def ocr_pdf(pdf_bytes):
     """Convierte PDF a texto via pytesseract."""
-    images = convert_from_bytes(pdf_bytes, dpi=300)
+    images = convert_from_bytes(pdf_bytes, dpi=150)
     texto = ''
     for img in images[:2]:  # solo primeras 2 páginas
         texto += pytesseract.image_to_string(img, lang='spa') + '\n'
