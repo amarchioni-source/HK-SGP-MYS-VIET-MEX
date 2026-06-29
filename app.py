@@ -393,13 +393,15 @@ def _get_fila_por_contenido(xml, trs, texto_clave):
 
 
 def _reemplazar_pallets_en_fila(fila_xml, pallets, kg_pallets):
+    # Reemplazar numero en texto largo: 'ACONDICIONADO EN 1 PALLET'
     fila_xml = re.sub(r'(ACONDICIONADO EN )\d+( PALLET)', r'\g<1>' + str(pallets) + r'\2', fila_xml)
     fila_xml = re.sub(r'(ACONDITIONED IN )\d+( PALLET)', r'\g<1>' + str(pallets) + r'\2', fila_xml)
-    fila_xml = re.sub(r'(<w:t[^>]*>)1(</w:t>)', r'\g<1>' + str(pallets) + r'\2', fila_xml, count=1)
+    # Reemplazar el <w:t>1</w:t> separado (sin atributos, es el numero de pallets)
+    fila_xml = fila_xml.replace('<w:t>1</w:t>', '<w:t>' + str(pallets) + '</w:t>', 1)
+    # Reemplazar kg pallets (32.44)
     if kg_pallets:
-        fila_xml = re.sub(r'(<w:t[^>]*>)32\.44(</w:t>)', r'\g<1>' + str(kg_pallets) + r'\2', fila_xml)
+        fila_xml = fila_xml.replace('<w:t>32.44</w:t>', '<w:t>' + str(kg_pallets) + '</w:t>')
     return fila_xml
-
 
 def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx_fallback,
                                   productos, total_cajas, total_neto, total_bruto,
