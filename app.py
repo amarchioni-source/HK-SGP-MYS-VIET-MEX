@@ -435,7 +435,13 @@ def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx_fallback,
         nueva_total = nueva_total.replace('>' + nums_tot[1] + '<', '>' + str(total_neto) + '<', 1)
         nueva_total = nueva_total.replace('>' + nums_tot[2] + '<', '>' + str(total_bruto_final) + '<', 1)
 
-    return xml[:ini_mod] + nuevas_filas + nueva_pal + nueva_total + xml[fin_tot:]
+    # Armar XML con productos nuevos
+    xml_nuevo = xml[:ini_mod] + nuevas_filas + nueva_pal + nueva_total + xml[fin_tot:]
+
+    # Buscar y reemplazar pallets en el XML final (por si quedaron restos)
+    xml_nuevo = _reemplazar_pallets_en_fila(xml_nuevo, pallets, kg_pallets)
+
+    return xml_nuevo
 
 
 def fmt_fecha_aereo(f):
