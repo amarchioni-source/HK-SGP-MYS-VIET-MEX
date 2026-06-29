@@ -11,10 +11,6 @@ app.config['MAX_CONTENT_LENGTH'] = 30 * 1024 * 1024
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 PLANT_DIR = BASE_DIR
 
-# ─────────────────────────────────────────────
-# RUTAS
-# ─────────────────────────────────────────────
-
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -38,13 +34,11 @@ def generar():
         if errores:
             return jsonify({'ok': False, 'errores': errores}), 400
 
-        reporte        = leer_reporte(reporte_f, shipment)
-        datos_remito   = leer_remito(remito_f.read())
-        datos_prov     = leer_sanitario_provisorio(sanitario_f.read())
+        reporte      = leer_reporte(reporte_f, shipment)
+        datos_remito = leer_remito(remito_f.read())
+        datos_prov   = leer_sanitario_provisorio(sanitario_f.read())
 
-        # Combinar datos
         datos = {**datos_remito, **datos_prov}
-        # Enriquecer nombres con inglés del reporte
         for prod in datos.get('productos', []):
             cod = prod.get('codigo', '')
             if cod in reporte.get('descripciones', {}):
@@ -128,14 +122,21 @@ def leer_reporte(file, shipment):
 
 
 # ─────────────────────────────────────────────
-# LEER REMITO (fitz - texto embebido)
+# LEER REMITO (fitz)
 # ─────────────────────────────────────────────
 
 def limpiar_num(s):
     if not s: return None
-    s = str(s).strip().replace(' ', '')
+    s = str(s).strip().replace(' ', '').replace('\n', '')
+    if not s: return None
+    # Formato europeo miles+decimal: 10.020,000
     if re.match(r'^\d{1,3}(\.\d{3})+(,\d+)?$', s):
         s = s.replace('.', '').replace(',', '.')
+    # Formato N.3decimales (remito Devesa): 320.000->320, 343.890->343.89
+    elif re.match(r'^\d+\.\d{3}$', s):
+        entero, dec = s.split('.')
+        dec_limpio = dec.rstrip('0')
+        s = f'{entero}.{dec_limpio}' if dec_limpio else entero
     else:
         s = s.replace(',', '.')
     try: return f'{float(s):.2f}'
@@ -151,7 +152,7 @@ def leer_remito(pdf_bytes):
 
     datos = {}
 
-    # ── Transporte ──────────────────────────────
+    # Transporte
     m_vuelo = re.search(r'Buque/Aerol[ií]nea[:\s]+([A-Z][A-Z\-\d]+)', texto, re.IGNORECASE)
     if m_vuelo:
         transport = m_vuelo.group(1).strip()
@@ -164,60 +165,60 @@ def leer_remito(pdf_bytes):
         else:
             datos['transporte'] = f'VAPOR / VESSEL: {transport}'
 
-    # ── Contenedor ──────────────────────────────
+    # Contenedor
     m_cont = re.search(r'CONTAINER[:\s]*([A-Z]{4}\d{6,7}-?\d?)', texto, re.IGNORECASE)
     datos['contenedor'] = m_cont.group(1).strip() if m_cont else None
 
-    # ── Precintos ───────────────────────────────
+    # Precintos
     m_ps = re.search(r'P\.S\.[:\s]+([A-Z0-9/]+)', texto)
     m_pa = re.search(r'P\.A\.[:\s]+([A-Z]{2,3}\d{4,8})', texto)
     datos['precinto_senasa'] = m_ps.group(1).strip() if m_ps else None
     datos['precinto_afip']   = m_pa.group(1).strip() if m_pa else None
 
-    # ── Pallets ─────────────────────────────────
+    # Pallets
     m_pallets = re.search(r'EN\s+(\d+)\s+PALLETS?', texto, re.IGNORECASE)
     datos['pallets'] = m_pallets.group(1) if m_pallets else None
 
-    # Peso pallet = tara contenedor o calculado
-    # KGS de pallet viene del provisorio
-
-    # ── Totales ─────────────────────────────────
+    # Totales
     m_tot_cajas = re.search(r'Total General\s+(\d[\d\.]*)\s', texto)
     m_tot_neto  = re.search(r'PESO NETO TOTAL[:\s]+([\d\.,]+)', texto)
     m_tot_bruto = re.search(r'PESO BRUTO TOTAL[:\s]+([\d\.,]+)', texto)
-    datos['total_cajas'] = m_tot_cajas.group(1).replace('.','') if m_tot_cajas else None
+    datos['total_cajas'] = m_tot_cajas.group(1).replace('.', '') if m_tot_cajas else None
     datos['total_neto']  = limpiar_num(m_tot_neto.group(1)) if m_tot_neto else None
     datos['total_bruto'] = limpiar_num(m_tot_bruto.group(1)) if m_tot_bruto else None
 
-    # ── Productos ───────────────────────────────
+    # Productos — parser línea por línea
     productos = []
-    # Patrón: CODIGO  DESCRIPCION  CAJAS  UNIDADES  KG.NETOS  KG.BRUTOS
-    patron = re.compile(
-        r'^(CD\d+)\s+(.+?)\s+(\d+)\s+\d+\s+([\d\.,]+)\s+([\d\.,]+)\s*$',
-        re.MULTILINE
-    )
-    for m in patron.finditer(texto):
-        codigo = m.group(1).strip()
-        desc   = m.group(2).strip()
-        cajas  = m.group(3).strip()
-        neto   = limpiar_num(m.group(4))
-        bruto  = limpiar_num(m.group(5))
-        nombre_es = buscar_nombre_es_remito(desc)
-        productos.append({
-            'codigo':    codigo,
-            'nombre_es': nombre_es,
-            'nombre_en': '',
-            'cajas':     cajas,
-            'neto':      neto,
-            'bruto':     bruto,
-        })
+    lineas = texto.split('\n')
+    i = 0
+    while i < len(lineas):
+        linea = lineas[i].strip()
+        if re.match(r'^CD\d+$', linea):
+            codigo    = linea
+            desc      = lineas[i+1].strip() if i+1 < len(lineas) else ''
+            cajas     = lineas[i+2].strip() if i+2 < len(lineas) else ''
+            # i+3 = unidades (saltar)
+            neto_raw  = lineas[i+4].strip() if i+4 < len(lineas) else ''
+            bruto_raw = lineas[i+5].strip() if i+5 < len(lineas) else ''
+            nombre_es = buscar_nombre_es_remito(desc)
+            productos.append({
+                'codigo':    codigo,
+                'nombre_es': nombre_es,
+                'nombre_en': '',
+                'cajas':     cajas,
+                'neto':      limpiar_num(neto_raw),
+                'bruto':     limpiar_num(bruto_raw),
+            })
+            i += 6
+        else:
+            i += 1
 
     datos['productos'] = productos
     return datos
 
 
 # ─────────────────────────────────────────────
-# LEER SANITARIO PROVISORIO (OCR - solo fechas y pallets KGS)
+# LEER SANITARIO PROVISORIO (OCR - solo fechas y kg pallets)
 # ─────────────────────────────────────────────
 
 def ocr_pdf(pdf_bytes):
@@ -247,16 +248,17 @@ def leer_sanitario_provisorio(pdf_bytes):
     texto = ocr_pdf(pdf_bytes)
     datos = {}
 
-    # ── Fechas ───────────────────────────────────
     def extraer_fecha(etiqueta):
         m = re.search(
-            rf'{etiqueta}[:\s\-—]+(\d{{2}}/\d{{2}}/\d{{4}}(?:\s+al?\s+\d{{2}}/\d{{2}}/\d{{4}})?)',
+            rf'{etiqueta}[:\s\-\u2014]+(\d{{2}}/\d{{2}}/\d{{4}}(?:\s+al?\s+\d{{2}}/\d{{2}}/\d{{4}})?)',
             texto, re.IGNORECASE
         )
         if m:
             fecha = m.group(1).strip()
+            # Limpiar ruido OCR al final
             fecha = re.sub(r'[^0-9/\s].*$', '', fecha).strip()
-            fecha = re.sub(r'\s+al?\s+', ' al ', fecha)
+            # Normalizar separador
+            fecha = re.sub(r'\s+al?\s+', ' al ', fecha, flags=re.IGNORECASE)
             return fecha
         return None
 
@@ -264,11 +266,10 @@ def leer_sanitario_provisorio(pdf_bytes):
     datos['fecha_produccion']  = extraer_fecha(r'Producci[oó]n')
     datos['fecha_vencimiento'] = extraer_fecha(r'Vencimiento')
 
-    # ── Pallets KGS ──────────────────────────────
-    m_pallets = re.search(r'EN\s+\d+\s+PALLETS?[:\s]+([\d\.,]+)\s*KGS?', texto, re.IGNORECASE)
-    datos['kg_pallets'] = limpiar_num(m_pallets.group(1)) if m_pallets else None
+    # KGS de pallets
+    m_kg = re.search(r'EN\s+\d+\s+PALLETS?[:\s]+([\d\.,]+)\s*KGS?', texto, re.IGNORECASE)
+    datos['kg_pallets'] = limpiar_num(m_kg.group(1)) if m_kg else None
 
-    # ── Fecha de emisión ─────────────────────────
     datos['fecha_emision'] = datetime.datetime.now().strftime('%d/%m/%Y')
 
     return datos
@@ -312,7 +313,6 @@ NOMBRES_PRODUCTO = sorted(MAPA_EN.keys(), key=len, reverse=True)
 
 
 def buscar_nombre_es_remito(desc):
-    """Extrae nombre corto en español de la descripción del remito."""
     d = desc.upper()
     for nombre in NOMBRES_PRODUCTO:
         if nombre in d:
@@ -325,7 +325,7 @@ def buscar_nombre_es_remito(desc):
 
 def buscar_nombre_en(nombre_es):
     n = nombre_es.upper()
-    for clave, en in MAPA_EN.items():
+    for clave, en in sorted(MAPA_EN.items(), key=lambda x: len(x[0]), reverse=True):
         if clave in n:
             return en
     return ''
@@ -390,48 +390,35 @@ def _construir_fila_maritimo(fila_modelo, cajas, nombre_bi, neto, bruto):
 
 
 def _get_fila_por_contenido(xml, trs, texto_clave):
-    """Busca una fila por texto que contiene."""
     for i, m in enumerate(trs):
         ini = m.start()
         fin = trs[i+1].start() if i+1 < len(trs) else len(xml)
-        fila = xml[ini:fin]
-        if texto_clave in fila:
-            return fila, ini, fin, i
+        if texto_clave in xml[ini:fin]:
+            return xml[ini:fin], ini, fin, i
     return None, None, None, None
 
 
-def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx, productos,
-                                  total_cajas, total_neto, total_bruto, tipo_via):
-    # Buscar fila modelo (primera fila de producto) por índice fijo
-    fila_modelo, ini_mod, _, _ = None, None, None, None
+def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx_fallback,
+                                  productos, total_cajas, total_neto, total_bruto, tipo_via):
+    # Buscar fila de pallets dinámicamente
+    _, _, _, idx_pal = _get_fila_por_contenido(xml, trs, 'ACONDICIONADO EN')
+    total_idx = (idx_pal + 1) if idx_pal is not None else total_idx_fallback
 
-    # Buscar fila de totales dinámicamente por contenido (total de cajas conocido o texto)
-    # La fila de totales tiene SOLO números grandes sin descripción
-    # Buscar la fila de ACONDICIONADO (pallets) primero
-    fila_pallets, ini_pal, fin_pal, idx_pal = _get_fila_por_contenido(xml, trs, 'ACONDICIONADO EN')
-
-    # La fila de totales está justo después de la fila de pallets
-    if idx_pal is not None:
-        total_idx_real = idx_pal + 1
-    else:
-        total_idx_real = total_idx
-
-    fila_modelo, ini_mod, _, _ = get_fila_xml(xml, trs, primera_idx)[:3] + (None,)
     fila_modelo, ini_mod, _ = get_fila_xml(xml, trs, primera_idx)
-    fila_total, ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx_real)
+    fila_total, ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx)
 
     nuevas_filas = ''
     for prod in productos:
-        nombre_bi = armar_nombre_bilingue(prod.get('nombre_es',''), prod.get('nombre_en',''))
+        nombre_bi = armar_nombre_bilingue(prod.get('nombre_es', ''), prod.get('nombre_en', ''))
         if tipo_via == 'aereo':
             nuevas_filas += _construir_fila_aereo(
-                fila_modelo, prod.get('cajas',''), nombre_bi,
-                prod.get('neto',''), prod.get('bruto','')
+                fila_modelo, prod.get('cajas', ''), nombre_bi,
+                prod.get('neto', ''), prod.get('bruto', '')
             )
         else:
             nuevas_filas += _construir_fila_maritimo(
-                fila_modelo, prod.get('cajas',''), nombre_bi,
-                prod.get('neto',''), prod.get('bruto','')
+                fila_modelo, prod.get('cajas', ''), nombre_bi,
+                prod.get('neto', ''), prod.get('bruto', '')
             )
 
     # Actualizar totales
@@ -443,6 +430,20 @@ def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx, productos,
         nueva_total = nueva_total.replace(f'>{nums_tot[2]}<', f'>{total_bruto}<', 1)
 
     return xml[:ini_mod] + nuevas_filas + nueva_total + xml[fin_tot:]
+
+
+def fmt_fecha_aereo(f):
+    if f and ' al ' in f.lower():
+        partes = re.split(r'\s+al\s+', f, flags=re.IGNORECASE)
+        return f'{partes[0]} AL/TO {partes[1]}'
+    return f
+
+
+def fmt_fecha_maritimo(f):
+    if f and ' al ' in f.lower():
+        partes = re.split(r'\s+al\s+', f, flags=re.IGNORECASE)
+        return f'{partes[0]} AL {partes[1]}'
+    return f
 
 
 def generar_sanitario(docx_bytes, datos, tipo_via):
@@ -477,13 +478,12 @@ def _gen_aereo(xml, datos):
 
     trs = get_trs(xml)
     xml = _reemplazar_bloque_productos(
-        xml, trs, primera_idx=5, total_idx=19,  # total_idx es fallback, se busca dinámicamente
+        xml, trs, primera_idx=5, total_idx_fallback=19,
         productos=productos,
         total_cajas=total_cajas, total_neto=total_neto, total_bruto=total_bruto,
         tipo_via='aereo'
     )
 
-    # Pallets
     pallets    = datos.get('pallets', '')
     kg_pallets = datos.get('kg_pallets', '')
     if pallets:
@@ -492,26 +492,17 @@ def _gen_aereo(xml, datos):
     if kg_pallets:
         xml = re.sub(r'>32\.44<', f'>{kg_pallets}<', xml)
 
-    # Fechas
     f_faena = datos.get('fecha_faena', '')
     f_prod  = datos.get('fecha_produccion', '')
     f_venc  = datos.get('fecha_vencimiento', '')
-    # Convertir formato "DD/MM/YYYY al DD/MM/YYYY" a "DD/MM/YYYY AL/TO DD/MM/YYYY"
-    def fmt_fecha_aereo(f):
-        if f and ' al ' in f.lower():
-            partes = re.split(r'\s+al\s+', f, flags=re.IGNORECASE)
-            return f'{partes[0]} AL/TO {partes[1]}'
-        return f
     if f_faena: xml = xml.replace('>16/12/2025<', f'>{fmt_fecha_aereo(f_faena)}<')
     if f_prod:  xml = xml.replace('>20/12/2025 AL/TO 22/12/2025<', f'>{fmt_fecha_aereo(f_prod)}<')
     if f_venc:  xml = xml.replace('>19/04/2026 AL/TO 21/04/2026<', f'>{fmt_fecha_aereo(f_venc)}<')
 
-    # Transporte
     transporte = datos.get('transporte', '')
     if transporte:
         xml = xml.replace('>VUELO / FLIGHT: EK248<', f'>{transporte}<')
 
-    # Fecha emisión
     fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
     try:
         dia, mes, anio = fecha_emi.split('/')
@@ -535,13 +526,12 @@ def _gen_maritimo(xml, datos):
 
     trs = get_trs(xml)
     xml = _reemplazar_bloque_productos(
-        xml, trs, primera_idx=5, total_idx=15,  # total_idx es fallback, se busca dinámicamente
+        xml, trs, primera_idx=5, total_idx_fallback=15,
         productos=productos,
         total_cajas=total_cajas, total_neto=total_neto, total_bruto=total_bruto,
         tipo_via='maritimo'
     )
 
-    # Pallets
     pallets    = datos.get('pallets', '')
     kg_pallets = datos.get('kg_pallets', '')
     if pallets:
@@ -550,25 +540,17 @@ def _gen_maritimo(xml, datos):
     if kg_pallets:
         xml = re.sub(r'>\([\d\.]+\s*KGS?', f'>({kg_pallets} KGS', xml)
 
-    # Fechas
     f_faena = datos.get('fecha_faena', '')
     f_prod  = datos.get('fecha_produccion', '')
     f_venc  = datos.get('fecha_vencimiento', '')
-    def fmt_fecha_maritimo(f):
-        if f and ' al ' in f.lower():
-            partes = re.split(r'\s+al\s+', f, flags=re.IGNORECASE)
-            return f'{partes[0]} AL {partes[1]}'
-        return f
     if f_faena: xml = xml.replace('>28/05/2026 AL 05/06/2026<', f'>{fmt_fecha_maritimo(f_faena)}<')
     if f_prod:  xml = xml.replace('>03/06/2026 AL 10/06/2026<', f'>{fmt_fecha_maritimo(f_prod)}<')
     if f_venc:  xml = xml.replace('>01/10/2026 AL 08/10/2026<', f'>{fmt_fecha_maritimo(f_venc)}<')
 
-    # Transporte
     transporte = datos.get('transporte', '')
     if transporte:
         xml = xml.replace('>VAPOR / VESSEL: TIGER PLATA<', f'>{transporte}<')
 
-    # Contenedor y precinto
     contenedor    = datos.get('contenedor', '')
     precinto_afip = datos.get('precinto_afip', '')
     if contenedor:    xml = xml.replace('>TCLU129408-4<', f'>{contenedor}<')
@@ -576,7 +558,6 @@ def _gen_maritimo(xml, datos):
     if not contenedor:    alertas.append('Contenedor no encontrado — completar manualmente')
     if not precinto_afip: alertas.append('Precinto A.F.I.P. no encontrado — completar manualmente')
 
-    # Fecha emisión
     fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
     try:
         dia, mes, anio = fecha_emi.split('/')
