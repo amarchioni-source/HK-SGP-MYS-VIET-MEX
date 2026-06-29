@@ -48,12 +48,7 @@
       color: #374151;
       margin-bottom: 2px;
     }
-    .hint {
-      font-size: 11px;
-      color: #9ca3af;
-      margin-bottom: 6px;
-      display: block;
-    }
+    .hint { font-size: 11px; color: #9ca3af; margin-bottom: 6px; display: block; }
     .badge {
       display: inline-block;
       font-size: 10px;
@@ -65,7 +60,7 @@
     }
     .badge-xlsx { background: #d1fae5; color: #065f46; }
     .badge-pdf  { background: #fee2e2; color: #991b1b; }
-    input[type="text"], select {
+    input[type="text"] {
       width: 100%;
       padding: 10px 14px;
       border: 1.5px solid #d1d5db;
@@ -75,15 +70,8 @@
       transition: border-color 0.2s;
       background: white;
     }
-    input[type="text"]:focus, select:focus {
-      outline: none;
-      border-color: #1a3a5c;
-    }
-    .radio-group {
-      display: flex;
-      gap: 12px;
-      margin-top: 4px;
-    }
+    input[type="text"]:focus { outline: none; border-color: #1a3a5c; }
+    .radio-group { display: flex; gap: 12px; margin-top: 4px; }
     .radio-option {
       flex: 1;
       display: flex;
@@ -100,15 +88,8 @@
       transition: all 0.2s;
       user-select: none;
     }
-    .radio-option:hover {
-      border-color: #1a3a5c;
-      background: #f0f6ff;
-    }
-    .radio-option.selected {
-      border-color: #1a3a5c;
-      background: #1a3a5c;
-      color: white;
-    }
+    .radio-option:hover { border-color: #1a3a5c; background: #f0f6ff; }
+    .radio-option.selected { border-color: #1a3a5c; background: #1a3a5c; color: white; }
     .radio-option input[type="radio"] { display: none; }
     .file-drop {
       border: 2px dashed #d1d5db;
@@ -120,10 +101,7 @@
       position: relative;
       background: #fafafa;
     }
-    .file-drop:hover, .file-drop.drag-over {
-      border-color: #1a3a5c;
-      background: #eff6ff;
-    }
+    .file-drop:hover, .file-drop.drag-over { border-color: #1a3a5c; background: #eff6ff; }
     .file-drop input[type="file"] {
       position: absolute; inset: 0;
       opacity: 0; cursor: pointer; width: 100%; height: 100%;
@@ -131,12 +109,7 @@
     .file-drop .icon { font-size: 24px; margin-bottom: 4px; }
     .file-drop .label { font-size: 13px; color: #6b7280; }
     .file-drop .label strong { color: #1a3a5c; }
-    .file-drop .filename {
-      margin-top: 6px;
-      font-size: 13px;
-      color: #059669;
-      font-weight: 600;
-    }
+    .file-drop .filename { margin-top: 6px; font-size: 13px; color: #059669; font-weight: 600; }
     .btn-generar {
       width: 100%;
       padding: 14px;
@@ -165,12 +138,7 @@
       animation: spin 0.8s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    .result-box {
-      display: none;
-      margin-top: 20px;
-      padding: 16px;
-      border-radius: 8px;
-    }
+    .result-box { display: none; margin-top: 20px; padding: 16px; border-radius: 8px; }
     .result-ok    { background: #f0fdf4; border: 1.5px solid #86efac; }
     .result-error { background: #fef2f2; border: 1.5px solid #fca5a5; }
     .result-box h3 { font-size: 15px; font-weight: 700; margin-bottom: 8px; }
@@ -219,7 +187,7 @@
 
     <div class="form-group">
       <label>Número de Shipment</label>
-      <input type="text" name="shipment_no" id="shipment_no" placeholder="Ej: 9649-6" autocomplete="off"/>
+      <input type="text" name="shipment_no" id="shipment_no" placeholder="Ej: 9500" autocomplete="off"/>
     </div>
 
     <div class="form-group">
@@ -239,13 +207,12 @@
     <div class="form-group">
       <label>
         Sanitario Provisorio
-        <span class="ocr-badge">⚡ OCR automático</span>
+        <span class="ocr-badge">⚡ OCR fechas</span>
         <span class="badge badge-pdf">PDF</span>
       </label>
-      <span class="hint">El PDF escaneado del certificado SENASA provisorio</span>
-      <div class="file-drop" id="drop-sanitario">
-        <input type="file" name="sanitario" id="input-sanitario" accept=".pdf"
-               onchange="mostrarNombre(this,'nombre-sanitario')"/>
+      <span class="hint">PDF escaneado del certificado SENASA provisorio</span>
+      <div class="file-drop">
+        <input type="file" name="sanitario" accept=".pdf" onchange="mostrarNombre(this,'nombre-sanitario')"/>
         <div class="icon">📄</div>
         <div class="label"><strong>Clic para elegir</strong> o arrastrar aquí</div>
         <div class="filename" id="nombre-sanitario"></div>
@@ -253,11 +220,21 @@
     </div>
 
     <div class="form-group">
+      <label>Remito <span class="badge badge-pdf">PDF</span></label>
+      <span class="hint">Ej: RTO_1894.pdf</span>
+      <div class="file-drop">
+        <input type="file" name="remito" accept=".pdf" onchange="mostrarNombre(this,'nombre-remito')"/>
+        <div class="icon">📋</div>
+        <div class="label"><strong>Clic para elegir</strong> o arrastrar aquí</div>
+        <div class="filename" id="nombre-remito"></div>
+      </div>
+    </div>
+
+    <div class="form-group">
       <label>Reporte DOC <span class="badge badge-xlsx">XLSX</span></label>
       <span class="hint">Ej: REPORTE_DOC_27_04_DEVESA_XXXXX.xlsx</span>
-      <div class="file-drop" id="drop-reporte">
-        <input type="file" name="reporte" id="input-reporte" accept=".xlsx"
-               onchange="mostrarNombre(this,'nombre-reporte')"/>
+      <div class="file-drop">
+        <input type="file" name="reporte" accept=".xlsx" onchange="mostrarNombre(this,'nombre-reporte')"/>
         <div class="icon">📊</div>
         <div class="label"><strong>Clic para elegir</strong> o arrastrar aquí</div>
         <div class="filename" id="nombre-reporte"></div>
@@ -274,9 +251,8 @@
 
   <hr class="divider"/>
   <div class="instrucciones">
-    <strong>Cómo usar:</strong> subí el sanitario provisorio (PDF escaneado) y el Reporte DOC,
-    ingresá el número de shipment, elegí la vía y hacé clic en Generar.<br/>
-    El sistema lee el PDF automáticamente y completa el certificado oficial.
+    <strong>Cómo usar:</strong> subí el sanitario provisorio (fechas), el remito (productos y kg),
+    el Reporte DOC (nombres en inglés), ingresá el shipment y elegí la vía.
   </div>
 </div>
 
@@ -289,9 +265,7 @@
 
   function mostrarNombre(input, id) {
     const el = document.getElementById(id);
-    if (input.files && input.files[0]) {
-      el.textContent = '✓ ' + input.files[0].name;
-    }
+    if (input.files && input.files[0]) el.textContent = '✓ ' + input.files[0].name;
   }
 
   document.querySelectorAll('.file-drop').forEach(zone => {
@@ -302,7 +276,6 @@
 
   document.getElementById('form-sanitario').addEventListener('submit', async function(e) {
     e.preventDefault();
-
     const btn     = document.getElementById('btn-generar');
     const texto   = document.getElementById('btn-texto');
     const spinner = document.getElementById('spinner');
@@ -311,10 +284,11 @@
     const shipment = document.getElementById('shipment_no').value.trim();
     const tipo_via = document.querySelector('input[name="tipo_via"]:checked')?.value || '';
     const sanitario = this.sanitario.files[0];
+    const remito    = this.remito.files[0];
     const reporte   = this.reporte.files[0];
 
-    if (!shipment || !tipo_via || !sanitario || !reporte) {
-      mostrarError(['Completá todos los campos, seleccioná la vía y subí ambos archivos.']);
+    if (!shipment || !tipo_via || !sanitario || !remito || !reporte) {
+      mostrarError(['Completá todos los campos y subí los 3 archivos.']);
       return;
     }
 
@@ -326,7 +300,6 @@
     try {
       const fd = new FormData(this);
       const resp = await fetch('/generar', { method: 'POST', body: fd });
-
       if (resp.ok) {
         const alertasHeader = resp.headers.get('X-Alertas') || '';
         const blob = await resp.blob();
@@ -341,7 +314,7 @@
         mostrarOk(alertasHeader ? alertasHeader.split(' | ') : []);
       } else {
         const data = await resp.json();
-        mostrarError(data.errores || ['Error desconocido al generar.']);
+        mostrarError(data.errores || ['Error desconocido.']);
       }
     } catch (err) {
       mostrarError(['Error de conexión: ' + err.message]);
