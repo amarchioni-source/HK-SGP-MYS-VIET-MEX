@@ -514,6 +514,27 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
     return out.read(), alertas
 
 
+
+def _reemplazar_fechas(xml, trs, f_faena, f_prod, f_venc, fmt_func):
+    """Busca la fila que contiene I.13/I.14/I.15 y reemplaza las fechas dinamicamente."""
+    for i, m in enumerate(trs):
+        ini = m.start()
+        fin = trs[i+1].start() if i+1 < len(trs) else len(xml)
+        fila = xml[ini:fin]
+        if 'I.13' in fila and 'I.14' in fila and 'I.15' in fila:
+            # Encontrar los 3 valores de fecha en la fila
+            fechas = re.findall(r'<w:t[^>]*>(\d{2}/\d{2}/\d{4}[^<]*)</w:t>', fila)
+            nueva_fila = fila
+            if len(fechas) >= 1 and f_faena:
+                nueva_fila = nueva_fila.replace('>' + fechas[0] + '<', '>' + fmt_func(f_faena) + '<', 1)
+            if len(fechas) >= 2 and f_prod:
+                nueva_fila = nueva_fila.replace('>' + fechas[1] + '<', '>' + fmt_func(f_prod) + '<', 1)
+            if len(fechas) >= 3 and f_venc:
+                nueva_fila = nueva_fila.replace('>' + fechas[2] + '<', '>' + fmt_func(f_venc) + '<', 1)
+            xml = xml[:ini] + nueva_fila + xml[fin:]
+            break
+    return xml
+
 # ── MALASIA AÉREO ────────────────────────────────────────────────────────────
 
 def _gen_malasia_aereo(xml, datos):
@@ -529,9 +550,8 @@ def _gen_malasia_aereo(xml, datos):
     f_faena = datos.get('fecha_faena','')
     f_prod  = datos.get('fecha_produccion','')
     f_venc  = datos.get('fecha_vencimiento','')
-    if f_faena: xml = xml.replace('>16/12/2025<', '>' + fmt_fecha_al_to(f_faena) + '<')
-    if f_prod:  xml = xml.replace('>20/12/2025 AL/TO 22/12/2025<', '>' + fmt_fecha_al_to(f_prod) + '<')
-    if f_venc:  xml = xml.replace('>19/04/2026 AL/TO 21/04/2026<', '>' + fmt_fecha_al_to(f_venc) + '<')
+    trs2 = get_trs(xml)
+    xml = _reemplazar_fechas(xml, trs2, f_faena, f_prod, f_venc, fmt_fecha_al_to)
     transporte = datos.get('transporte','')
     if transporte: xml = xml.replace('>VUELO / FLIGHT: EK248<', '>VUELO / FLIGHT: ' + transporte + '<')
     xml = _set_temperatura_singapur(xml, datos.get('es_congelado', False), tipo_via='aereo')
@@ -559,9 +579,8 @@ def _gen_malasia_maritimo(xml, datos):
     f_faena = datos.get('fecha_faena','')
     f_prod  = datos.get('fecha_produccion','')
     f_venc  = datos.get('fecha_vencimiento','')
-    if f_faena: xml = xml.replace('>28/05/2026 AL 05/06/2026<', '>' + fmt_fecha_al(f_faena) + '<')
-    if f_prod:  xml = xml.replace('>03/06/2026 AL 10/06/2026<', '>' + fmt_fecha_al(f_prod) + '<')
-    if f_venc:  xml = xml.replace('>01/10/2026 AL 08/10/2026<', '>' + fmt_fecha_al(f_venc) + '<')
+    trs2 = get_trs(xml)
+    xml = _reemplazar_fechas(xml, trs2, f_faena, f_prod, f_venc, fmt_fecha_al)
     transporte = datos.get('transporte','')
     if transporte: xml = xml.replace('>VAPOR / VESSEL: TIGER PLATA<', '>VAPOR / VESSEL: ' + transporte + '<')
     contenedor    = datos.get('contenedor','')
@@ -596,9 +615,8 @@ def _gen_singapur_aereo(xml, datos):
     f_faena = datos.get('fecha_faena','')
     f_prod  = datos.get('fecha_produccion','')
     f_venc  = datos.get('fecha_vencimiento','')
-    if f_faena: xml = xml.replace('>07/05/2026 AL/TO 01/06/2026<', '>' + fmt_fecha_al_to(f_faena) + '<')
-    if f_prod:  xml = xml.replace('>12/05/2026 AL/TO 03/06/2026<', '>' + fmt_fecha_al_to(f_prod) + '<')
-    if f_venc:  xml = xml.replace('>31/07/2026 AL/TO 01/10/2026<', '>' + fmt_fecha_al_to(f_venc) + '<')
+    trs2 = get_trs(xml)
+    xml = _reemplazar_fechas(xml, trs2, f_faena, f_prod, f_venc, fmt_fecha_al_to)
     # Transporte (vuelo)
     transporte = datos.get('transporte','')
     if transporte: xml = xml.replace('>: LX093<', '>: ' + transporte + '<')
@@ -629,9 +647,8 @@ def _gen_singapur_maritimo(xml, datos):
     f_faena = datos.get('fecha_faena','')
     f_prod  = datos.get('fecha_produccion','')
     f_venc  = datos.get('fecha_vencimiento','')
-    if f_faena: xml = xml.replace('>09/03/2026 AL/TO 19/03/2026<', '>' + fmt_fecha_al_to(f_faena) + '<')
-    if f_prod:  xml = xml.replace('>12/03/2026 AL/TO 21/03/2026<', '>' + fmt_fecha_al_to(f_prod) + '<')
-    if f_venc:  xml = xml.replace('>12/03/2028 AL/TO 21/03/2028<', '>' + fmt_fecha_al_to(f_venc) + '<')
+    trs2 = get_trs(xml)
+    xml = _reemplazar_fechas(xml, trs2, f_faena, f_prod, f_venc, fmt_fecha_al_to)
     # Transporte (barco)
     transporte = datos.get('transporte','')
     if transporte: xml = xml.replace('>: SAN ANTONIO MAERSK<', '>: ' + transporte + '<')
