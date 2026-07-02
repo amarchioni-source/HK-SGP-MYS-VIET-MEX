@@ -46,7 +46,7 @@
       font-size: 13px;
       font-weight: 600;
       color: #374151;
-      margin-bottom: 2px;
+      margin-bottom: 6px;
     }
     .hint { font-size: 11px; color: #9ca3af; margin-bottom: 6px; display: block; }
     .badge {
@@ -60,7 +60,7 @@
     }
     .badge-xlsx { background: #d1fae5; color: #065f46; }
     .badge-pdf  { background: #fee2e2; color: #991b1b; }
-    input[type="text"] {
+    input[type="text"], select {
       width: 100%;
       padding: 10px 14px;
       border: 1.5px solid #d1d5db;
@@ -70,27 +70,7 @@
       transition: border-color 0.2s;
       background: white;
     }
-    input[type="text"]:focus { outline: none; border-color: #1a3a5c; }
-    .radio-group { display: flex; gap: 12px; margin-top: 4px; }
-    .radio-option {
-      flex: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      padding: 10px 14px;
-      border: 1.5px solid #d1d5db;
-      border-radius: 8px;
-      cursor: pointer;
-      font-size: 14px;
-      font-weight: 600;
-      color: #374151;
-      transition: all 0.2s;
-      user-select: none;
-    }
-    .radio-option:hover { border-color: #1a3a5c; background: #f0f6ff; }
-    .radio-option.selected { border-color: #1a3a5c; background: #1a3a5c; color: white; }
-    .radio-option input[type="radio"] { display: none; }
+    input[type="text"]:focus, select:focus { outline: none; border-color: #1a3a5c; }
     .file-drop {
       border: 2px dashed #d1d5db;
       border-radius: 8px;
@@ -191,17 +171,14 @@
     </div>
 
     <div class="form-group">
-      <label>Vía de transporte</label>
-      <div class="radio-group">
-        <label class="radio-option" id="opt-aereo" onclick="seleccionarVia('aereo')">
-          <input type="radio" name="tipo_via" value="aereo" id="radio-aereo"/>
-          ✈️ Aéreo
-        </label>
-        <label class="radio-option" id="opt-maritimo" onclick="seleccionarVia('maritimo')">
-          <input type="radio" name="tipo_via" value="maritimo" id="radio-maritimo"/>
-          🚢 Marítimo
-        </label>
-      </div>
+      <label>Destino y vía</label>
+      <select name="destino_via" id="destino_via">
+        <option value="">-- Seleccionar destino y vía --</option>
+        <option value="malasia_aereo">🇲🇾 Malasia — Aéreo</option>
+        <option value="malasia_maritimo">🇲🇾 Malasia — Marítimo</option>
+        <option value="singapur_aereo">🇸🇬 Singapur — Aéreo</option>
+        <option value="singapur_maritimo">🇸🇬 Singapur — Marítimo</option>
+      </select>
     </div>
 
     <div class="form-group">
@@ -262,18 +239,12 @@
 
   <hr class="divider"/>
   <div class="instrucciones">
-    <strong>Cómo usar:</strong> subí el piqueo (fechas), el sanitario provisorio (pallets),
-    el remito (productos y kg), el Reporte DOC (nombres en inglés), ingresá el shipment y elegí la vía.
+    <strong>Cómo usar:</strong> seleccioná el destino y vía, subí el piqueo, el sanitario provisorio,
+    el remito y el Reporte DOC, ingresá el shipment y generá.
   </div>
 </div>
 
 <script>
-  function seleccionarVia(via) {
-    document.getElementById('radio-' + via).checked = true;
-    document.getElementById('opt-aereo').classList.toggle('selected', via === 'aereo');
-    document.getElementById('opt-maritimo').classList.toggle('selected', via === 'maritimo');
-  }
-
   function mostrarNombre(input, id) {
     const el = document.getElementById(id);
     if (input.files && input.files[0]) el.textContent = '✓ ' + input.files[0].name;
@@ -292,14 +263,15 @@
     const spinner = document.getElementById('spinner');
     const box     = document.getElementById('result-box');
 
-    const shipment  = document.getElementById('shipment_no').value.trim();
-    const tipo_via  = document.querySelector('input[name="tipo_via"]:checked')?.value || '';
+    const shipment    = document.getElementById('shipment_no').value.trim();
+    const destino_via = document.getElementById('destino_via').value;
+    const [destino, tipo_via] = destino_via ? destino_via.split('_') : ['', ''];
     const piqueo    = this.piqueo.files[0];
     const sanitario = this.sanitario.files[0];
     const remito    = this.remito.files[0];
     const reporte   = this.reporte.files[0];
 
-    if (!shipment || !tipo_via || !piqueo || !sanitario || !remito || !reporte) {
+    if (!shipment || !destino_via || !piqueo || !sanitario || !remito || !reporte) {
       mostrarError(['Completá todos los campos y subí los 4 archivos.']);
       return;
     }
@@ -311,6 +283,8 @@
 
     try {
       const fd = new FormData(this);
+      fd.set('destino', destino);
+      fd.set('tipo_via', tipo_via);
       const resp = await fetch('/generar', { method: 'POST', body: fd });
       if (resp.ok) {
         const alertasHeader = resp.headers.get('X-Alertas') || '';
@@ -319,7 +293,7 @@
         const a    = document.createElement('a');
         const cd   = resp.headers.get('Content-Disposition') || '';
         const match = cd.match(/filename="?([^"]+)"?/);
-        a.download = match ? match[1] : `Sanitario_Malasia_${tipo_via}_${shipment}.docx`;
+        a.download = match ? match[1] : 'Sanitario_' + destino + '_' + tipo_via + '_' + shipment + '.docx';
         a.href = url;
         a.click();
         URL.revokeObjectURL(url);
@@ -341,7 +315,7 @@
     const box = document.getElementById('result-box');
     box.className = 'result-box result-ok';
     let html = '<h3>✓ Listo — revisá tu carpeta de descargas</h3>';
-    alertas.forEach(a => { html += `<div class="alerta-item">⚠️ ${a}</div>`; });
+    alertas.forEach(a => { html += '<div class="alerta-item">⚠️ ' + a + '</div>'; });
     box.innerHTML = html;
     box.style.display = 'block';
   }
@@ -350,7 +324,7 @@
     const box = document.getElementById('result-box');
     box.className = 'result-box result-error';
     let html = '<h3>No se pudo generar el sanitario</h3><ul>';
-    errores.forEach(e => html += `<li>- ${e}</li>`);
+    errores.forEach(e => html += '<li>- ' + e + '</li>');
     html += '</ul>';
     box.innerHTML = html;
     box.style.display = 'block';
