@@ -516,52 +516,66 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
 
 
 def _reemplazar_fechas(xml, trs, f_faena, f_prod, f_venc, fmt_func):
-    """Busca filas con I.13/I.14/I.15 y reemplaza fechas aunque esten fragmentadas en w:t."""
-    # Las fechas pueden estar en 1 fila o en filas separadas
-    # y pueden estar fragmentadas en multiples <w:t>
-    # Estrategia: reconstruir el texto de cada fila, encontrar las celdas de fecha,
-    # y reemplazar el bloque XML de cada celda completa
-
-    def _texto_fila(fila):
-        return ''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', fila))
+    """Busca filas con I.13/I.14/I.15 y reemplaza solo la parte de fecha,
+    preservando los titulos (I.13.Fecha de faena/, Date of slaughter, etc.)"""
 
     def _get_celdas(fila):
         starts = [m.start() for m in re.finditer(r'<w:tc>', fila)]
         ends   = [m.start() for m in re.finditer(r'</w:tc>', fila)]
         return [(s, e) for s, e in zip(starts, ends)]
 
-    def _texto_celda(fila, cs, ce):
-        return ''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', fila[cs:ce]))
-
-    def _reemplazar_celda_fecha(fila, cs, ce, nuevo):
+    def _reemplazar_fecha_en_celda(fila, cs, ce, nuevo):
         bloque = fila[cs:ce]
-        # Poner todo el texto en el primer w:t y vaciar el resto
+        # Encontrar todos los w:t con su posicion
         wts = list(re.finditer(r'<w:t[^>]*>[^<]*</w:t>', bloque))
-        if not wts:
+        if not wts: return fila
+
+        # Encontrar el primer w:t que contiene digitos de fecha (dd o /mm o /yyyy)
+        # Los titulos son texto como "I.13.Fecha de faena/" y "Date of slaughter"
+        # La fecha empieza cuando aparece un fragmento con solo digitos o slash
+        # Reconstruir texto completo de la celda para encontrar donde empieza la fecha
+        txt_completo = ''.join(re.search(r'<w:t[^>]*>([^<]*)</w:t>', wt.group()).group(1) for wt in wts)
+        # Buscar posicion del primer dd/ en el texto completo
+        m_fecha = re.search(r'\d{2}/', txt_completo)
+        if not m_fecha:
             return fila
+
+        # Encontrar que w:t corresponde a esa posicion
+        fecha_inicio_idx = None
+        pos_acum = 0
+        for idx, wt in enumerate(wts):
+            txt_wt = re.search(r'<w:t[^>]*>([^<]*)</w:t>', wt.group()).group(1)
+            if pos_acum + len(txt_wt) > m_fecha.start():
+                fecha_inicio_idx = idx
+                break
+            pos_acum += len(txt_wt)
+
+        if fecha_inicio_idx is None: return fila
+
+        # Reemplazar desde fecha_inicio_idx en adelante
         nuevo_bloque = bloque
-        # Vaciar todos
-        for wt in wts:
+        offset = 0
+        for idx, wt in enumerate(wts):
+            if idx < fecha_inicio_idx: continue
             tag = re.match(r'<w:t[^>]*>', wt.group()).group()
-            nuevo_bloque = nuevo_bloque.replace(wt.group(), tag + '</w:t>', 1)
-        # Poner nuevo valor en el primero
-        primer = list(re.finditer(r'<w:t[^>]*></w:t>', nuevo_bloque))[0]
-        tag = re.match(r'<w:t[^>]*>', primer.group()).group()
-        # Necesitamos xml:space preserve para espacios
-        tag_preserve = '<w:t xml:space="preserve">'
-        nuevo_bloque = nuevo_bloque[:primer.start()] + tag_preserve + nuevo + '</w:t>' + nuevo_bloque[primer.end():]
+            old_wt = wt.group()
+            pos = nuevo_bloque.find(old_wt, offset)
+            if idx == fecha_inicio_idx:
+                # Primer fragmento de fecha: poner el valor nuevo con preserve
+                new_wt = '<w:t xml:space="preserve">' + nuevo + '</w:t>'
+            else:
+                # Fragmentos siguientes: vaciar
+                new_wt = tag + '</w:t>'
+            nuevo_bloque = nuevo_bloque[:pos] + new_wt + nuevo_bloque[pos + len(old_wt):]
+            offset = pos + len(new_wt)
+
         return fila[:cs] + nuevo_bloque + fila[ce:]
 
-    fechas_a_reemplazar = [
-        (f_faena, fmt_func),
-        (f_prod,  fmt_func),
-        (f_venc,  fmt_func),
-    ]
+    fechas_a_reemplazar = [(f_faena, fmt_func), (f_prod, fmt_func), (f_venc, fmt_func)]
     fecha_idx = 0
 
     for i, m in enumerate(trs):
-        if fecha_idx >= 3:
-            break
+        if fecha_idx >= 3: break
         ini = m.start()
         fin = trs[i+1].start() if i+1 < len(trs) else len(xml)
         fila = xml[ini:fin]
@@ -574,16 +588,14 @@ def _reemplazar_fechas(xml, trs, f_faena, f_prod, f_venc, fmt_func):
         offset = 0
 
         for cs, ce in celdas:
-            if fecha_idx >= 3:
-                break
-            txt = _texto_celda(nueva_fila, cs + offset, ce + offset)
-            # Detectar si la celda contiene una fecha (con posible fragmentacion)
-            txt_limpio = txt.strip()
-            if re.search(r'\d{2}/\d{2}/\d{4}', txt_limpio):
+            if fecha_idx >= 3: break
+            bloque = nueva_fila[cs+offset:ce+offset]
+            txt_celda = ''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', bloque))
+            if re.search(r'\d{2}/\d{2}/\d{4}', txt_celda):
                 f_nueva, fmt = fechas_a_reemplazar[fecha_idx]
                 if f_nueva:
                     fila_antes = nueva_fila
-                    nueva_fila = _reemplazar_celda_fecha(nueva_fila, cs + offset, ce + offset, fmt(f_nueva))
+                    nueva_fila = _reemplazar_fecha_en_celda(nueva_fila, cs+offset, ce+offset, fmt(f_nueva))
                     offset += len(nueva_fila) - len(fila_antes)
                 fecha_idx += 1
 
@@ -727,33 +739,53 @@ def _gen_singapur_maritimo(xml, datos):
 # ── TEMPERATURA SINGAPUR ─────────────────────────────────────────────────────
 
 def _set_temperatura_singapur(xml, es_congelado, tipo_via):
-    # Aéreo plantilla: X en refrigeración (pos 2), congelación vacío (pos 3)
-    # Marítimo plantilla: X en congelación (pos 3), refrigeración vacío (pos 1)
-    # Si es_congelado: X debe estar en congelación
-    # Si no es_congelado (enfriado): X debe estar en refrigeración
-    if tipo_via == 'aereo':
-        if es_congelado:
-            # Mover X de refrigeración a congelación
-            # Quitar X de refrigeración, poner X en congelación
-            xml = re.sub(
-                r'(De refrigeraci[oó]n[^<]*</w:t>[^<]*<[^>]+>[^<]*</[^>]+>\s*<[^>]+>\s*)<w:t>X</w:t>',
-                r'\1<w:t></w:t>', xml, count=1
-            )
-            xml = re.sub(
-                r'(De congelaci[oó]n[^<]*</w:t>[^<]*<[^>]+>[^<]*</[^>]+>\s*<[^>]+>\s*)<w:t></w:t>',
-                r'\1<w:t>X</w:t>', xml, count=1
-            )
-    else:  # maritimo
-        if not es_congelado:
-            # Mover X de congelación a refrigeración
-            xml = re.sub(
-                r'(De congelaci[oó]n[^<]*</w:t>[^<]*<[^>]+>[^<]*</[^>]+>\s*<[^>]+>\s*)<w:t>X</w:t>',
-                r'\1<w:t></w:t>', xml, count=1
-            )
-            xml = re.sub(
-                r'(De refrigeraci[oó]n[^<]*</w:t>[^<]*<[^>]+>[^<]*</[^>]+>\s*<[^>]+>\s*)<w:t></w:t>',
-                r'\1<w:t>X</w:t>', xml, count=1
-            )
+    """Todas las plantillas tienen X en refrigeracion por defecto.
+    Si es congelado, mover X a congelacion. Si es enfriado, dejar en refrigeracion."""
+    if not es_congelado:
+        return xml  # X ya esta en refrigeracion, no hacer nada
+
+    # Es congelado: buscar la fila de temperatura y mover la X
+    trs = list(re.finditer(r'<w:tr[ >]', xml))
+    for i, m in enumerate(trs):
+        ini = m.start()
+        fin = trs[i+1].start() if i+1 < len(trs) else len(xml)
+        fila = xml[ini:fin]
+        txt = ''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', fila))
+        if 'efrigerac' not in txt or 'ongela' not in txt:
+            continue
+        if 'X' not in fila:
+            continue
+        # Fila de temperatura: quitar X de refrigeracion
+        nueva_fila = fila.replace('<w:t>X</w:t>', '<w:t></w:t>', 1)
+        # Poner X en la celda siguiente a "De congelacion"
+        # La celda de congelacion tiene el label, la siguiente es el checkbox (vacio)
+        celda_starts = [m2.start() for m2 in re.finditer(r'<w:tc>', nueva_fila)]
+        celda_ends   = [m2.start() for m2 in re.finditer(r'</w:tc>', nueva_fila)]
+        for idx_c, (cs, ce) in enumerate(zip(celda_starts, celda_ends)):
+            bloque = nueva_fila[cs:ce]
+            if 'ongela' in ''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', bloque)):
+                # La siguiente celda es el checkbox de congelacion
+                if idx_c + 1 < len(celda_starts):
+                    cs2 = celda_starts[idx_c + 1]
+                    ce2 = celda_ends[idx_c + 1]
+                    bloque2 = nueva_fila[cs2:ce2]
+                    # Si tiene w:t vacio, reemplazarlo; si no, insertar antes de </w:tc>
+                    if '<w:t></w:t>' in bloque2:
+                        nuevo_bloque2 = bloque2.replace('<w:t></w:t>', '<w:t>X</w:t>', 1)
+                    elif re.search(r'<w:t[^>]*></w:t>', bloque2):
+                        nuevo_bloque2 = re.sub(r'<w:t[^>]*></w:t>', '<w:t>X</w:t>', bloque2, count=1)
+                    else:
+                        # Insertar w:r con w:t>X antes de </w:tc>
+                        # Buscar el ultimo </w:p> para insertar el run ahi
+                        insert_pos = bloque2.rfind('</w:p>')
+                        if insert_pos >= 0:
+                            nuevo_bloque2 = bloque2[:insert_pos] + '<w:r><w:t>X</w:t></w:r>' + bloque2[insert_pos:]
+                        else:
+                            nuevo_bloque2 = bloque2
+                    nueva_fila = nueva_fila[:cs2] + nuevo_bloque2 + nueva_fila[ce2:]
+                break
+        xml = xml[:ini] + nueva_fila + xml[fin:]
+        break
     return xml
 
 
