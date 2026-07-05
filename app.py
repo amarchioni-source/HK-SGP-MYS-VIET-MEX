@@ -1,4 +1,4 @@
-import os, re, io, zipfile, datetime, tempfile, subprocess
+import os, re, io, zipfile, datetime, tempfile, subprocess, unicodedata
 from flask import Flask, render_template, request, send_file, jsonify
 import openpyxl
 import pytesseract
@@ -10,6 +10,14 @@ app.config['MAX_CONTENT_LENGTH'] = 30 * 1024 * 1024
 
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 PLANT_DIR = BASE_DIR
+
+
+def _normalizar(s):
+    """minusculas + sin tildes, para matchear nombres de archivo de plantilla
+    sin importar mayusculas/minusculas o acentos (ej. 'SINGAPUR Aéreo.docx')."""
+    s = s.lower()
+    s = unicodedata.normalize('NFKD', s)
+    return ''.join(c for c in s if not unicodedata.combining(c))
 
 @app.route('/')
 def index():
@@ -59,7 +67,6 @@ def generar():
                 prod['nombre_en'] = buscar_nombre_en(prod.get('nombre_es', ''))
             prod['lotes'] = lotes_map.get(cod, '')
 
-        import glob
         PATRONES_DESTINO = {
             'malasia':  'alasia',
             'singapur': 'ingapur',
@@ -67,14 +74,15 @@ def generar():
         }
         patron_via = 'aereo' if tipo_via == 'aereo' else 'mar'
         patron_dest = PATRONES_DESTINO.get(destino, PATRONES_DESTINO['malasia'])
-        candidatos = glob.glob(os.path.join(PLANT_DIR, '*' + patron_dest + '*' + patron_via + '*.docx'))
+        todos_docx = [f for f in os.listdir(PLANT_DIR) if f.lower().endswith('.docx')]
+        candidatos = [f for f in todos_docx if patron_dest in _normalizar(f) and patron_via in _normalizar(f)]
         if not candidatos:
-            candidatos = glob.glob(os.path.join(PLANT_DIR, '*' + patron_dest + '*.docx'))
+            candidatos = [f for f in todos_docx if patron_dest in _normalizar(f)]
         if not candidatos:
             return jsonify({'ok': False, 'errores': [
                 'Plantilla no encontrada para destino=' + destino + ' via=' + tipo_via + '. Archivos: ' + str(os.listdir(PLANT_DIR))
             ]}), 500
-        plantilla = candidatos[0]
+        plantilla = os.path.join(PLANT_DIR, candidatos[0])
 
         with open(plantilla, 'rb') as f:
             docx_bytes = f.read()
@@ -99,18 +107,36 @@ def generar():
 # ── PIQUEO ───────────────────────────────────────────────────────────────────
 
 def leer_piqueo(file):
-    wb = openpyxl.load_workbook(file)
-    ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
+    wb = openpyxl.load_workbook(file, data_only=True)
 
-    # Buscar fila de headers dinamicamente
+    # Buscar entre TODAS las hojas la que tenga headers de producto (Cod Prod/Codigo).
+    # No asumir que la hoja activa (wb.active) es la correcta - puede haber hojas
+    # sueltas/borrador (ej. "Hoja1") marcadas como activas por accidente.
+    ws = None
+    rows = None
     hdr_idx = None
-    for i, row in enumerate(rows[:5]):
-        if row and any(str(v or '').strip() in ('Cod Prod', 'Producto', 'Fecha F', 'Fecha P') for v in row):
-            hdr_idx = i
+    for sheet in wb.worksheets:
+        rows_tmp = list(sheet.iter_rows(values_only=True))
+        for i, row in enumerate(rows_tmp[:5]):
+            if not row: continue
+            valores = [str(v or '').strip() for v in row]
+            tiene_cod   = any(v in ('Cod Prod', 'Codigo') for v in valores)
+            tiene_fecha = any(v in ('Fecha F', 'Fecha P', 'Fecha Ven') for v in valores)
+            if tiene_cod and tiene_fecha:
+                ws, rows, hdr_idx = sheet, rows_tmp, i
+                break
+        if ws is not None:
             break
-    if hdr_idx is None:
+
+    if ws is None:
+        # Fallback: comportamiento anterior (hoja activa) por si ninguna calza
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
         hdr_idx = 0
+        for i, row in enumerate(rows[:5]):
+            if row and any(str(v or '').strip() in ('Cod Prod', 'Producto', 'Fecha F', 'Fecha P') for v in row):
+                hdr_idx = i
+                break
 
     hdr = rows[hdr_idx]
 
@@ -250,7 +276,7 @@ def leer_remito(pdf_bytes):
     for page in doc: texto += page.get_text()
     doc.close()
     datos = {}
-    m_vuelo = re.search(r'Buque/Aerol[ii]nea[:\s]+([A-Z][A-Z\-\d]+)', texto, re.IGNORECASE)
+    m_vuelo = re.search(r'Buque/Aerol[íi]nea[:\s]+([^\n\r]+)', texto, re.IGNORECASE)
     if m_vuelo:
         transport = m_vuelo.group(1).strip()
         if '-' in transport:
@@ -267,7 +293,7 @@ def leer_remito(pdf_bytes):
     m_cont = re.search(r'CONTAINER[:\s]*([A-Z]{4}\d{6,7}-?\d?)', texto, re.IGNORECASE)
     datos['contenedor'] = m_cont.group(1).strip() if m_cont else None
     m_ps = re.search(r'P\.S\.[:\s]+([A-Z0-9/]+)', texto)
-    m_pa = re.search(r'P\.A\.[:\s]+([A-Z]{2,3}\d{4,8})', texto)
+    m_pa = re.search(r'P\.A\.[:\s]+([A-Z]{2,3}\s?\d{4,8})', texto)
     datos['precinto_senasa'] = m_ps.group(1).strip() if m_ps else None
     datos['precinto_afip']   = m_pa.group(1).strip() if m_pa else None
     m_pallets = re.search(r'EN\s+(\d+)\s+PALLETS?', texto, re.IGNORECASE)
@@ -292,6 +318,7 @@ def leer_remito(pdf_bytes):
             nombre_es = buscar_nombre_es_remito(desc)
             productos.append({
                 'codigo': codigo, 'nombre_es': nombre_es, 'nombre_en': '',
+                'desc_original': desc,
                 'cajas': cajas, 'neto': limpiar_num(neto_raw), 'bruto': limpiar_num(bruto_raw),
             })
             i += 6
@@ -329,7 +356,7 @@ def ocr_pdf(pdf_bytes):
 def leer_sanitario_provisorio(pdf_bytes):
     texto = ocr_pdf(pdf_bytes)
     datos = {}
-    m_kg = re.search(r'EN\s+(\d+)\s+PALLETS?[:\s]+(\d[\d\.]*)', texto, re.IGNORECASE)
+    m_kg = re.search(r'EN\s+(\d+)\s+PALLETS?[:\s]+([\d\.,]+)', texto, re.IGNORECASE)
     if m_kg:
         datos['pallets_prov'] = m_kg.group(1)
         datos['kg_pallets']   = limpiar_num(m_kg.group(2))
@@ -410,6 +437,46 @@ def armar_nombre_bilingue(nombre_es, nombre_en):
     return es
 
 
+# ── NOMBRES ESPECIFICOS MÉXICO (corte / "pulpa" / ingles) ────────────────────
+# Tabla fija por tipo de corte, requerida por la certificacion mexicana.
+# No todos los cortes llevan calificador de "pulpa" (ver TAPA DE CUADRIL,
+# BIFE ANGOSTO, BIFE ANCHO en los ejemplos - no llevan).
+MAPA_MEXICO = {
+    'NALGA DE AFUERA':  {'es': 'NALGA DE AFUERA CT', 'pulpa': 'PULPA BLANCA', 'en': 'BEEF GOOSENECK'},
+    'NALGA CON TAPA':   {'es': 'NALGA CON TAPA',      'pulpa': 'PULPA NEGRA', 'en': 'BEEF TOP (INSIDE) ROUND'},
+    'BOLA DE LOMO':     {'es': 'BOLA DE LOMO',        'pulpa': 'PULPA BOLA',  'en': 'BONELESS BEEF KNUCKLE'},
+    'TAPA DE CUADRIL':  {'es': 'TAPA DE CUADRIL',     'pulpa': None,          'en': 'BONELESS BEEF RUMP CAP'},
+    'BIFE ANGOSTO':     {'es': 'BIFE ANGOSTO CC',     'pulpa': None,          'en': 'BONELESS BEEF NEW YORK'},
+    'BIFE ANCHO':       {'es': 'BIFE ANCHO',          'pulpa': None,          'en': 'BONELESS BEEF RIB EYE'},
+}
+CLAVES_MEXICO = sorted(MAPA_MEXICO.keys(), key=len, reverse=True)
+
+
+def buscar_info_mexico(desc_original):
+    """Busca el corte dentro de la descripcion cruda del remito (ej.
+    'NALGA DE AFUERA C/TORTGUITA (MEX) GF') y devuelve su info de Mexico,
+    o None si no esta en la tabla (corte nuevo, no mapeado todavia)."""
+    d = (desc_original or '').upper()
+    for clave in CLAVES_MEXICO:
+        if clave in d:
+            return MAPA_MEXICO[clave]
+    return None
+
+
+def armar_nombre_mexico(prod):
+    """Arma el nombre de 3 partes 'ES/ PULPA / EN' (o 2 partes 'ES / EN' si
+    el corte no lleva pulpa) para el certificado de Mexico. Si el corte no
+    esta en MAPA_MEXICO, cae al nombre bilingue generico (mejor avisar con
+    una alerta manualmente que dejar la celda vacia)."""
+    info = buscar_info_mexico(prod.get('desc_original', ''))
+    if info is None:
+        return armar_nombre_bilingue(prod.get('nombre_es', ''), prod.get('nombre_en', ''))
+    es, pulpa, en = info['es'], info['pulpa'], info['en']
+    if pulpa:
+        return es + '/ ' + pulpa + ' / ' + en
+    return es + ' / ' + en
+
+
 # ── XML HELPERS ──────────────────────────────────────────────────────────────
 
 def get_trs(xml):
@@ -486,16 +553,19 @@ def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx_fallback,
                                   productos, total_cajas, total_neto, total_bruto,
                                   pallets, kg_pallets, neto_celda=6, bruto_celda=7,
                                   lotes_celda=None, sumar_pallet_a_bruto=True,
-                                  total_replacer=None):
+                                  total_replacer=None, armar_nombre_func=None):
     fila_pal, ini_pal, fin_pal, idx_pal = _get_fila_por_contenido(xml, trs, 'ACONDICIONADO EN')
     total_idx = (idx_pal + 1) if idx_pal is not None else total_idx_fallback
 
     fila_modelo, ini_mod, _ = get_fila_xml(xml, trs, primera_idx)
     fila_total, ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx)
 
+    if armar_nombre_func is None:
+        armar_nombre_func = lambda prod: armar_nombre_bilingue(prod.get('nombre_es', ''), prod.get('nombre_en', ''))
+
     nuevas_filas = ''
     for prod in productos:
-        nombre_bi = armar_nombre_bilingue(prod.get('nombre_es', ''), prod.get('nombre_en', ''))
+        nombre_bi = armar_nombre_func(prod)
         nuevas_filas += _construir_fila(
             fila_modelo, prod.get('cajas', ''), nombre_bi,
             prod.get('neto', ''), prod.get('bruto', ''), neto_celda, bruto_celda,
@@ -523,7 +593,6 @@ def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx_fallback,
             nueva_total = nueva_total.replace('>' + nums_tot[2] + '<', '>' + str(total_bruto_final) + '<', 1)
 
     xml_nuevo = xml[:ini_mod] + nuevas_filas + nueva_pal + nueva_total + xml[fin_tot:]
-    xml_nuevo = _reemplazar_pallets_en_fila(xml_nuevo, pallets, kg_pallets)
     return xml_nuevo
 
 
@@ -541,11 +610,51 @@ def fmt_fecha_al(f):
     return f or ''
 
 
+def _merge_runs_xml(xml):
+    """Fusiona <w:r> adyacentes con el mismo <w:rPr> dentro de cada parrafo,
+    concatenando sus <w:t>. Word fragmenta el texto en runs distintos (marcas
+    de revision, corrector ortografico), lo que rompe los reemplazos simples
+    basados en substring (ej. 'VAPOR/VESSEL:  NOMBRE' guardado en 3 runs
+    separados). Solo fusiona runs de texto simple (un unico <w:t>, sin tabs,
+    saltos de linea u otros elementos) para no arriesgar contenido complejo."""
+    def _procesar_parrafo(m):
+        parrafo = m.group(0)
+        cambiado = True
+        while cambiado:
+            cambiado = False
+            runs = list(re.finditer(r'<w:r(?:\s[^>]*)?>(.*?)</w:r>', parrafo, re.DOTALL))
+            for i in range(len(runs) - 1):
+                r1, r2 = runs[i], runs[i + 1]
+                if parrafo[r1.end():r2.start()]:
+                    continue  # no son estrictamente adyacentes
+                rpr1 = re.search(r'<w:rPr>.*?</w:rPr>', r1.group(1), re.DOTALL)
+                rpr2 = re.search(r'<w:rPr>.*?</w:rPr>', r2.group(1), re.DOTALL)
+                if (rpr1.group(0) if rpr1 else '') != (rpr2.group(0) if rpr2 else ''):
+                    continue
+                t1 = re.findall(r'<w:t[^>]*>([^<]*)</w:t>', r1.group(1))
+                t2 = re.findall(r'<w:t[^>]*>([^<]*)</w:t>', r2.group(1))
+                # Solo fusionar runs de un unico <w:t> simple (evita tabs/breaks/drawings)
+                if len(t1) != 1 or len(t2) != 1:
+                    continue
+                if r1.group(1).count('<w:t') != 1 or r2.group(1).count('<w:t') != 1:
+                    continue
+                texto_unido = t1[0] + t2[0]
+                rpr_txt = rpr1.group(0) if rpr1 else ''
+                nuevo_run = '<w:r>' + rpr_txt + '<w:t xml:space="preserve">' + texto_unido + '</w:t></w:r>'
+                parrafo = parrafo[:r1.start()] + nuevo_run + parrafo[r2.end():]
+                cambiado = True
+                break
+        return parrafo
+
+    return re.sub(r'<w:p(?:\s[^>]*)?>.*?</w:p>', _procesar_parrafo, xml, flags=re.DOTALL)
+
+
 def generar_sanitario(docx_bytes, datos, tipo_via, destino):
     alertas = []
     with zipfile.ZipFile(io.BytesIO(docx_bytes), 'r') as z:
         archivos = {n: z.read(n) for n in z.namelist()}
     xml = archivos['word/document.xml'].decode('utf-8')
+    xml = _merge_runs_xml(xml)
     if destino == 'singapur':
         if tipo_via == 'aereo':
             xml, al = _gen_singapur_aereo(xml, datos)
@@ -810,6 +919,13 @@ def _gen_mexico_maritimo(xml, datos):
     total_neto_fmt  = formatear_miles(datos.get('total_neto', ''))
     total_bruto_fmt = formatear_miles(datos.get('total_bruto', ''))
 
+    for prod in datos.get('productos', []):
+        if buscar_info_mexico(prod.get('desc_original', '')) is None:
+            alertas.append(
+                'Corte "' + prod.get('desc_original', prod.get('nombre_es', ''))
+                + '" no esta en la tabla de nombres de Mexico - se uso el nombre generico, revisar manualmente'
+            )
+
     xml = _reemplazar_bloque_productos(
         xml, trs, primera_idx=5, total_idx_fallback=13,
         productos=datos.get('productos', []),
@@ -818,7 +934,8 @@ def _gen_mexico_maritimo(xml, datos):
         neto_celda=6, bruto_celda=7,
         lotes_celda=5,
         sumar_pallet_a_bruto=False,  # el total de la plantilla Mexico NO suma el peso de pallets
-        total_replacer=lambda fila, tc, tn, tb: _reemplazar_total_celdas(fila, tc, tn, tb)
+        total_replacer=lambda fila, tc, tn, tb: _reemplazar_total_celdas(fila, tc, tn, tb),
+        armar_nombre_func=armar_nombre_mexico
     )
 
     # Fechas I.13/I.14/I.15
