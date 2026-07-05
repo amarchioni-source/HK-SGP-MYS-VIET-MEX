@@ -50,16 +50,23 @@ def generar():
         # Congelado: remito tiene prioridad sobre provisorio
         if datos_remito.get('es_congelado') is not None:
             datos['es_congelado'] = datos_remito['es_congelado']
+        lotes_map = datos_piqueo.get('lotes_por_producto', {})
         for prod in datos.get('productos', []):
             cod = prod.get('codigo', '')
             if cod in reporte.get('descripciones', {}):
                 prod['nombre_en'] = reporte['descripciones'][cod]
             else:
                 prod['nombre_en'] = buscar_nombre_en(prod.get('nombre_es', ''))
+            prod['lotes'] = lotes_map.get(cod, '')
 
         import glob
+        PATRONES_DESTINO = {
+            'malasia':  'alasia',
+            'singapur': 'ingapur',
+            'mexico':   'exico',
+        }
         patron_via = 'aereo' if tipo_via == 'aereo' else 'mar'
-        patron_dest = 'ingapur' if destino == 'singapur' else 'alasia'
+        patron_dest = PATRONES_DESTINO.get(destino, PATRONES_DESTINO['malasia'])
         candidatos = glob.glob(os.path.join(PLANT_DIR, '*' + patron_dest + '*' + patron_via + '*.docx'))
         if not candidatos:
             candidatos = glob.glob(os.path.join(PLANT_DIR, '*' + patron_dest + '*.docx'))
@@ -123,11 +130,13 @@ def leer_piqueo(file):
     prod_min  = prod_max  = None
     venc_min  = venc_max  = None
     pallets_set = set()
+    lotes_por_cod = {}  # Cod Prod -> set de fechas 'Fecha P' (YYYYMMDD), para Nº de lotes (ej. Mexico)
 
     for row in rows[hdr_idx + 1:]:
         if not row: continue
         cod = row[c_cod] if c_cod is not None and c_cod < len(row) else None
         if not cod: continue
+        cod = str(cod).strip()
 
         if c_pallet is not None and c_pallet < len(row) and row[c_pallet]:
             pallets_set.add(str(row[c_pallet]))
@@ -142,6 +151,7 @@ def leer_piqueo(file):
         if isinstance(fecha_p, datetime.datetime):
             prod_min = min(prod_min, fecha_p) if prod_min else fecha_p
             prod_max = max(prod_max, fecha_p) if prod_max else fecha_p
+            lotes_por_cod.setdefault(cod, set()).add(fecha_p.strftime('%Y%m%d'))
         if isinstance(fecha_v, datetime.datetime):
             venc_min = min(venc_min, fecha_v) if venc_min else fecha_v
             venc_max = max(venc_max, fecha_v) if venc_max else fecha_v
@@ -153,11 +163,16 @@ def leer_piqueo(file):
             s += ' al ' + d_max.strftime('%d/%m/%Y')
         return s
 
+    lotes_por_producto = {
+        cod: ' - '.join(sorted(fechas)) for cod, fechas in lotes_por_cod.items()
+    }
+
     return {
         'fecha_faena':       fmt_rango(faena_min, faena_max),
         'fecha_produccion':  fmt_rango(prod_min,  prod_max),
         'fecha_vencimiento': fmt_rango(venc_min,  venc_max),
         'pallets_piqueo':    str(len(pallets_set)) if pallets_set else None,
+        'lotes_por_producto': lotes_por_producto,
     }
 
 
@@ -208,6 +223,23 @@ def limpiar_num(s):
         s = s.replace(',', '.')
     try: return '{:.2f}'.format(float(s))
     except Exception: return s
+
+
+def formatear_miles(valor):
+    """Convierte un numero (string con punto decimal, ej '21692.00') al formato
+    con separador de miles por punto y decimales con coma (ej '21.692,00'),
+    usado en el certificado de Mexico."""
+    try:
+        f = float(valor)
+    except (TypeError, ValueError):
+        return valor
+    entero, dec = '{:.2f}'.format(f).split('.')
+    signo = ''
+    if entero.startswith('-'):
+        signo = '-'
+        entero = entero[1:]
+    entero_fmt = '{:,}'.format(int(entero)).replace(',', '.')
+    return signo + entero_fmt + ',' + dec
 
 
 # ── REMITO (fitz) ────────────────────────────────────────────────────────────
@@ -406,10 +438,13 @@ def _reemplazar_celda(xml_fila, celda_idx, nuevo_texto):
     return xml_fila[:celda_starts[celda_idx]] + nuevo_bloque + xml_fila[celda_ends[celda_idx]:]
 
 
-def _construir_fila(fila_modelo, cajas, nombre_bi, neto, bruto, neto_celda, bruto_celda):
+def _construir_fila(fila_modelo, cajas, nombre_bi, neto, bruto, neto_celda, bruto_celda,
+                     lotes=None, lotes_celda=None):
     nueva = fila_modelo
     nueva = _reemplazar_celda(nueva, 0, str(cajas))
     nueva = _reemplazar_celda(nueva, 1, nombre_bi)
+    if lotes_celda is not None:
+        nueva = _reemplazar_celda(nueva, lotes_celda, str(lotes or ''))
     nueva = _reemplazar_celda(nueva, neto_celda, str(neto))
     nueva = _reemplazar_celda(nueva, bruto_celda, str(bruto))
     return nueva
@@ -434,15 +469,24 @@ def _reemplazar_pallets_en_fila(fila_xml, pallets, kg_pallets):
             fila_xml = fila_xml.replace(viejo, '<w:t>' + str(pallets) + '</w:t>', 1)
             break
     if kg_pallets:
-        fila_xml = fila_xml.replace('<w:t>32.44</w:t>', '<w:t>' + str(kg_pallets) + '</w:t>')
-        fila_xml = fila_xml.replace('<w:t>151.77</w:t>', '<w:t>' + str(kg_pallets) + '</w:t>')
-        fila_xml = fila_xml.replace('<w:t>664.35</w:t>', '<w:t>' + str(kg_pallets) + '</w:t>')
+        # Caso generico: el numero de KGS esta en el mismo run que el texto "KGS)" (ej. Mexico)
+        nueva_fila, n = re.subn(r'[\d\.]+(\s*KGS\))', str(kg_pallets) + r'\1', fila_xml, count=1)
+        if n:
+            fila_xml = nueva_fila
+        else:
+            # Fallback: numero de KGS aislado en su propio w:t (plantillas viejas)
+            for viejo_kg in ['<w:t>32.44</w:t>', '<w:t>151.77</w:t>', '<w:t>664.35</w:t>']:
+                if viejo_kg in fila_xml:
+                    fila_xml = fila_xml.replace(viejo_kg, '<w:t>' + str(kg_pallets) + '</w:t>')
+                    break
     return fila_xml
 
 
 def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx_fallback,
                                   productos, total_cajas, total_neto, total_bruto,
-                                  pallets, kg_pallets, neto_celda=6, bruto_celda=7):
+                                  pallets, kg_pallets, neto_celda=6, bruto_celda=7,
+                                  lotes_celda=None, sumar_pallet_a_bruto=True,
+                                  total_replacer=None):
     fila_pal, ini_pal, fin_pal, idx_pal = _get_fila_por_contenido(xml, trs, 'ACONDICIONADO EN')
     total_idx = (idx_pal + 1) if idx_pal is not None else total_idx_fallback
 
@@ -454,22 +498,29 @@ def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx_fallback,
         nombre_bi = armar_nombre_bilingue(prod.get('nombre_es', ''), prod.get('nombre_en', ''))
         nuevas_filas += _construir_fila(
             fila_modelo, prod.get('cajas', ''), nombre_bi,
-            prod.get('neto', ''), prod.get('bruto', ''), neto_celda, bruto_celda
+            prod.get('neto', ''), prod.get('bruto', ''), neto_celda, bruto_celda,
+            lotes=prod.get('lotes', ''), lotes_celda=lotes_celda
         )
 
     nueva_pal = _reemplazar_pallets_en_fila(fila_pal, pallets, kg_pallets) if fila_pal else ''
 
-    try:
-        total_bruto_final = '{:.2f}'.format(float(total_bruto) + float(kg_pallets or 0))
-    except Exception:
+    if sumar_pallet_a_bruto:
+        try:
+            total_bruto_final = '{:.2f}'.format(float(total_bruto) + float(kg_pallets or 0))
+        except Exception:
+            total_bruto_final = total_bruto
+    else:
         total_bruto_final = total_bruto
 
-    nums_tot = re.findall(r'<w:t[^>]*>(\d[\d\.]*)</w:t>', fila_total)
-    nueva_total = fila_total
-    if len(nums_tot) >= 3:
-        nueva_total = nueva_total.replace('>' + nums_tot[0] + '<', '>' + str(total_cajas) + '<', 1)
-        nueva_total = nueva_total.replace('>' + nums_tot[1] + '<', '>' + str(total_neto) + '<', 1)
-        nueva_total = nueva_total.replace('>' + nums_tot[2] + '<', '>' + str(total_bruto_final) + '<', 1)
+    if total_replacer is not None:
+        nueva_total = total_replacer(fila_total, total_cajas, total_neto, total_bruto_final)
+    else:
+        nums_tot = re.findall(r'<w:t[^>]*>(\d[\d\.]*)</w:t>', fila_total)
+        nueva_total = fila_total
+        if len(nums_tot) >= 3:
+            nueva_total = nueva_total.replace('>' + nums_tot[0] + '<', '>' + str(total_cajas) + '<', 1)
+            nueva_total = nueva_total.replace('>' + nums_tot[1] + '<', '>' + str(total_neto) + '<', 1)
+            nueva_total = nueva_total.replace('>' + nums_tot[2] + '<', '>' + str(total_bruto_final) + '<', 1)
 
     xml_nuevo = xml[:ini_mod] + nuevas_filas + nueva_pal + nueva_total + xml[fin_tot:]
     xml_nuevo = _reemplazar_pallets_en_fila(xml_nuevo, pallets, kg_pallets)
@@ -500,6 +551,8 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
             xml, al = _gen_singapur_aereo(xml, datos)
         else:
             xml, al = _gen_singapur_maritimo(xml, datos)
+    elif destino == 'mexico':
+        xml, al = _gen_mexico_maritimo(xml, datos)
     else:
         if tipo_via == 'aereo':
             xml, al = _gen_malasia_aereo(xml, datos)
@@ -733,6 +786,74 @@ def _gen_singapur_maritimo(xml, datos):
     # Fecha emision
     fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
     xml = xml.replace('>14/04/2026<', '>' + fecha_emi + '<')
+    return xml, alertas
+
+
+# ── MÉXICO MARÍTIMO ──────────────────────────────────────────────────────────
+
+def _reemplazar_total_celdas(fila_total, total_cajas, total_neto, total_bruto,
+                              cajas_celda=0, neto_celda=2, bruto_celda=3):
+    """Reemplaza la fila de totales por indice de celda en vez de buscar numeros
+    sueltos en el XML. Necesario cuando los totales usan formato con coma
+    decimal (ej. '21.692,00'), que no matchea como numero simple."""
+    nueva = fila_total
+    nueva = _reemplazar_celda(nueva, cajas_celda, str(total_cajas))
+    nueva = _reemplazar_celda(nueva, neto_celda, str(total_neto))
+    nueva = _reemplazar_celda(nueva, bruto_celda, str(total_bruto))
+    return nueva
+
+
+def _gen_mexico_maritimo(xml, datos):
+    alertas = []
+    trs = get_trs(xml)
+
+    total_neto_fmt  = formatear_miles(datos.get('total_neto', ''))
+    total_bruto_fmt = formatear_miles(datos.get('total_bruto', ''))
+
+    xml = _reemplazar_bloque_productos(
+        xml, trs, primera_idx=5, total_idx_fallback=13,
+        productos=datos.get('productos', []),
+        total_cajas=datos.get('total_cajas', ''), total_neto=total_neto_fmt, total_bruto=total_bruto_fmt,
+        pallets=datos.get('pallets', '1'), kg_pallets=datos.get('kg_pallets', ''),
+        neto_celda=6, bruto_celda=7,
+        lotes_celda=5,
+        sumar_pallet_a_bruto=False,  # el total de la plantilla Mexico NO suma el peso de pallets
+        total_replacer=lambda fila, tc, tn, tb: _reemplazar_total_celdas(fila, tc, tn, tb)
+    )
+
+    # Fechas I.13/I.14/I.15
+    f_faena = datos.get('fecha_faena', '')
+    f_prod  = datos.get('fecha_produccion', '')
+    f_venc  = datos.get('fecha_vencimiento', '')
+    trs2 = get_trs(xml)
+    xml = _reemplazar_fechas(xml, trs2, f_faena, f_prod, f_venc, fmt_fecha_al)
+
+    # Transporte (buque)
+    transporte = datos.get('transporte', '')
+    if transporte: xml = xml.replace('>VAPOR/VESSEL:  SUNNY PHOENIX<', '>VAPOR/VESSEL:  ' + transporte + '<')
+
+    # Contenedor
+    contenedor = datos.get('contenedor', '')
+    if contenedor: xml = xml.replace('>ZMOU8965406<', '>' + contenedor + '<')
+    if not contenedor: alertas.append('Contenedor no encontrado - completar manualmente')
+
+    # Precinto combinado AFIP / SENASA
+    precinto_afip   = datos.get('precinto_afip', '')
+    precinto_senasa = datos.get('precinto_senasa', '')
+    if precinto_afip or precinto_senasa:
+        combinado = (precinto_afip or '') + ' / ' + (precinto_senasa or '')
+        xml = xml.replace('>BAH66487 / 0039365<', '>' + combinado + '<')
+    if not precinto_afip:   alertas.append('Precinto AFIP no encontrado - completar manualmente')
+    if not precinto_senasa: alertas.append('Precinto SENASA no encontrado - completar manualmente')
+
+    # Temperatura
+    es_congelado = datos.get('es_congelado', False)
+    xml = _set_temperatura_singapur(xml, es_congelado, tipo_via='maritimo')
+
+    # Fecha de emision
+    fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
+    xml = xml.replace('>22/04/2026<', '>' + fecha_emi + '<')
+
     return xml, alertas
 
 
