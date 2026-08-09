@@ -68,9 +68,10 @@ def generar():
             prod['lotes'] = lotes_map.get(cod, '')
 
         PATRONES_DESTINO = {
-            'malasia':  'alasia',
-            'singapur': 'ingapur',
-            'mexico':   'exico',
+            'malasia':    'alasia',
+            'singapur':   'ingapur',
+            'mexico':     'exico',
+            'usawclass': 'class',
         }
         patron_via = 'aereo' if tipo_via == 'aereo' else 'mar'
         patron_dest = PATRONES_DESTINO.get(destino, PATRONES_DESTINO['malasia'])
@@ -296,6 +297,9 @@ def leer_remito(pdf_bytes):
     m_pa = re.search(r'P\.A\.[:\s]+([A-Z]{2,3}\s?\d{4,8})', texto)
     datos['precinto_senasa'] = m_ps.group(1).strip() if m_ps else None
     datos['precinto_afip']   = m_pa.group(1).strip() if m_pa else None
+    m_contra = re.search(r'CONTRAMARCA[:\s]+([^\n\r]+)', texto, re.IGNORECASE)
+    contra = m_contra.group(1).strip() if m_contra else ''
+    datos['contramarca'] = contra if contra else None
     m_pallets = re.search(r'EN\s+(\d+)\s+PALLETS?', texto, re.IGNORECASE)
     datos['pallets'] = m_pallets.group(1) if m_pallets else None
     m_tot_cajas = re.search(r'Total General\s+(\d[\d\.]*)', texto)
@@ -610,6 +614,33 @@ def fmt_fecha_al(f):
     return f or ''
 
 
+def fmt_fecha_al_to_usa(f):
+    """'dd/mm/yyyy al dd/mm/yyyy' -> 'dd/mm/yyyy al/to dd/mm/yyyy' (formato USA, minuscula)."""
+    if f and ' al ' in f.lower():
+        partes = re.split(r'\s+al\s+', f, flags=re.IGNORECASE)
+        return partes[0].strip() + ' al/to ' + partes[1].strip()
+    return f or ''
+
+
+def fecha_a_lote_usa(f):
+    """'dd/mm/yyyy al dd/mm/yyyy' -> 'YYYYMMDD al/to YYYYMMDD' (mismo rango que fecha de produccion, Lote de USA)."""
+    if not f or ' al ' not in f.lower():
+        return f or ''
+    partes = re.split(r'\s+al\s+', f, flags=re.IGNORECASE)
+    salida = []
+    for p in partes:
+        m = re.match(r'(\d{2})/(\d{2})/(\d{4})', p.strip())
+        salida.append(m.group(3) + m.group(2) + m.group(1) if m else p.strip())
+    return ' al/to '.join(salida)
+
+
+def kg_a_lbs(kg):
+    try:
+        return '{:.2f}'.format(float(str(kg).replace(',', '.')) * 2.20462)
+    except (TypeError, ValueError):
+        return ''
+
+
 def _merge_runs_xml(xml):
     """Fusiona <w:r> adyacentes con el mismo <w:rPr> dentro de cada parrafo,
     concatenando sus <w:t>. Word fragmenta el texto en runs distintos (marcas
@@ -617,6 +648,8 @@ def _merge_runs_xml(xml):
     basados en substring (ej. 'VAPOR/VESSEL:  NOMBRE' guardado en 3 runs
     separados). Solo fusiona runs de texto simple (un unico <w:t>, sin tabs,
     saltos de linea u otros elementos) para no arriesgar contenido complejo."""
+    xml = re.sub(r'<w:proofErr[^/]*/>', '', xml)  # el corrector ortografico bloquea la fusion de runs adyacentes
+
     def _procesar_parrafo(m):
         parrafo = m.group(0)
         cambiado = True
@@ -662,6 +695,8 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
             xml, al = _gen_singapur_maritimo(xml, datos)
     elif destino == 'mexico':
         xml, al = _gen_mexico_maritimo(xml, datos)
+    elif destino == 'usawclass':
+        xml, al = _gen_usa_wclass(xml, datos)
     else:
         if tipo_via == 'aereo':
             xml, al = _gen_malasia_aereo(xml, datos)
@@ -1025,6 +1060,72 @@ def _set_temperatura_singapur(xml, es_congelado, tipo_via):
         xml = xml[:ini] + nueva_fila + xml[fin:]
         break
     return xml
+
+
+# ── USA W CLASS ───────────────────────────────────────────────────────────────
+# Sin desglose producto por producto: un solo total, y la clave es la
+# CONTRAMARCA (I.10 Marca de embarque). Fecha de producción y Lote son el
+# mismo rango de fechas, solo que en formatos distintos (dd/mm/yyyy vs YYYYMMDD).
+
+def _gen_usa_wclass(xml, datos):
+    alertas = []
+
+    total_cajas = str(datos.get('total_cajas', '') or '')
+    contramarca = datos.get('contramarca', '') or ''
+    if not contramarca:
+        alertas.append('Contramarca no encontrada en el remito - completar manualmente')
+
+    f_prod = datos.get('fecha_produccion', '') or ''
+    f_venc = datos.get('fecha_vencimiento', '') or ''
+    if not f_prod:
+        alertas.append('Fecha de producción no encontrada en el piqueo - completar manualmente')
+    if not f_venc:
+        alertas.append('Fecha límite de conservación no encontrada - completar manualmente')
+
+    peso_neto_kg  = str(datos.get('total_neto', '') or '')
+    peso_neto_lbs = kg_a_lbs(peso_neto_kg)
+
+    fecha_prod_fmt = fmt_fecha_al_to_usa(f_prod)
+    lote_fmt       = fecha_a_lote_usa(f_prod)
+    fecha_venc_fmt = fmt_fecha_al_to_usa(f_venc)
+    fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
+
+    # Bultos - misma cifra aparece 3 veces (fila ES, fila EN, fila Totales)
+    if total_cajas:
+        xml = xml.replace('>239<', '>' + total_cajas + '<')
+
+    # Fecha de producción - aparece 2 veces con valores de ejemplo distintos
+    # en la plantilla; ambas se completan con el mismo rango real.
+    if fecha_prod_fmt:
+        xml = xml.replace('>26/06/2026 al/to 03/07/2026<', '>' + fecha_prod_fmt + '<')
+        xml = xml.replace('>30/06/2026 al/to 08/07/2026<', '>' + fecha_prod_fmt + '<')
+
+    # Marca de embarque / Contramarca - aparece 2 veces (fila ES y fila EN)
+    if contramarca:
+        xml = xml.replace('>C221<', '>' + contramarca + '<')
+
+    # Lote - mismo rango que fecha de producción, en formato YYYYMMDD
+    if lote_fmt:
+        xml = xml.replace('>20260630 al/to 20260708<', '>' + lote_fmt + '<')
+
+    # Peso neto en KGS y en LBS (el texto va junto a la unidad en el mismo run)
+    if peso_neto_kg:
+        kg_fmt = peso_neto_kg.replace('.', ',')
+        xml = xml.replace('>4594,00 KGS<', '>' + kg_fmt + ' KGS<')
+        xml = xml.replace('>4594,00<', '>' + kg_fmt + '<')
+    if peso_neto_lbs:
+        lbs_fmt = peso_neto_lbs.replace('.', ',')
+        xml = xml.replace('>10128,02 LBS<', '>' + lbs_fmt + ' LBS<')
+        xml = xml.replace('>10128,02<', '>' + lbs_fmt + '<')
+
+    # Fecha límite de conservación (I.15)
+    if fecha_venc_fmt:
+        xml = xml.replace('>31/08/2026 al/to 05/11/2026<', '>' + fecha_venc_fmt + '<')
+
+    # Fecha de emisión (pie del certificado)
+    xml = xml.replace('>13/07/2026<', '>' + fecha_emi + '<')
+
+    return xml, alertas
 
 
 if __name__ == '__main__':
