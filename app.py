@@ -61,11 +61,8 @@ def generar():
         lotes_map = datos_piqueo.get('lotes_por_producto', {})
         fecha_prod_map  = datos_piqueo.get('fecha_produccion_por_producto', {})
         fecha_faena_map = datos_piqueo.get('fecha_faena_por_producto', {})
-        lineas_usa = datos_prov.get('lineas_usa', [])
-        lineas_usa_por_cajas = {}
-        for l in lineas_usa:
-            lineas_usa_por_cajas.setdefault(l['cajas'], []).append(l)
-        for prod in datos.get('productos', []):
+        productos_list = datos.get('productos', [])
+        for prod in productos_list:
             cod = prod.get('codigo', '')
             if cod in reporte.get('descripciones', {}):
                 prod['nombre_en'] = reporte['descripciones'][cod]
@@ -74,9 +71,59 @@ def generar():
             prod['lotes'] = lotes_map.get(cod, '')
             prod['fecha_produccion_prod'] = fecha_prod_map.get(cod, '')
             prod['fecha_faena_prod']      = fecha_faena_map.get(cod, '')
-            candidatos = lineas_usa_por_cajas.get(str(prod.get('cajas', '')), [])
-            if len(candidatos) == 1:
-                prod['contramarca'] = candidatos[0]['contramarca']
+
+        # Cruce de Contramarca (formato USA con anexo) en 3 niveles, porque el
+        # OCR del sanitario provisorio viene con ruido (numeros perdidos o mal
+        # leidos): 1) por cantidad de cajas cuando matchea unico; 2) por nombre
+        # del producto dentro del texto de la linea, para las que no tienen
+        # cajas; 3) por eliminacion, si al final queda exactamente 1 producto
+        # y 1 codigo valido sin asignar. Los codigos se validan contra la
+        # lista real del remito (CONTRAMARCA:C164/65/66/...) para descartar
+        # lecturas OCR invalidas (ej. C185 cuando el unico codigo posible es C165).
+        lineas_usa = datos_prov.get('lineas_usa', [])
+        codigos_validos = set(expandir_contramarcas(datos_remito.get('contramarca') or ''))
+        if codigos_validos and len(codigos_validos) < len(productos_list):
+            # El campo CONTRAMARCA del remito vino truncado/incompleto (la capa de
+            # texto del PDF a veces corta el campo aunque visualmente se vea completo).
+            # Como las contramarcas de USA son siempre un rango consecutivo, se infiere
+            # el rango completo a partir del primer numero confirmado + la cantidad de
+            # productos del envio.
+            numeros = sorted(set(int(re.sub(r'\D', '', c)) for c in codigos_validos))
+            base = numeros[0]
+            codigos_validos = set('C' + str(base + i) for i in range(len(productos_list)))
+        if codigos_validos:
+            lineas_usa = [l for l in lineas_usa if l['contramarca'] in codigos_validos]
+
+        usados_cod = set()
+        usados_idx = set()
+
+        por_cajas = {}
+        for l in lineas_usa:
+            if l['cajas']:
+                por_cajas.setdefault(l['cajas'], []).append(l)
+        for i, prod in enumerate(productos_list):
+            cand = por_cajas.get(str(prod.get('cajas', '')), [])
+            if len(cand) == 1 and cand[0]['contramarca'] not in usados_cod:
+                prod['contramarca'] = cand[0]['contramarca']
+                usados_cod.add(cand[0]['contramarca'])
+                usados_idx.add(i)
+
+        for l in lineas_usa:
+            if l['contramarca'] in usados_cod:
+                continue
+            texto_l = l.get('texto', '')
+            cand_idx = [i for i, p in enumerate(productos_list)
+                        if i not in usados_idx and (p.get('nombre_es') or '').upper() in texto_l]
+            if len(cand_idx) == 1:
+                i = cand_idx[0]
+                productos_list[i]['contramarca'] = l['contramarca']
+                usados_cod.add(l['contramarca'])
+                usados_idx.add(i)
+
+        restantes_idx = [i for i in range(len(productos_list)) if i not in usados_idx]
+        restantes_cod = [c for c in codigos_validos if c not in usados_cod]
+        if len(restantes_idx) == 1 and len(restantes_cod) == 1:
+            productos_list[restantes_idx[0]]['contramarca'] = restantes_cod[0]
 
         PATRONES_DESTINO = {
             'malasia':     'alasia',
@@ -262,6 +309,33 @@ def leer_reporte(file, shipment):
 
 # ── UTILIDADES NUMÉRICAS ─────────────────────────────────────────────────────
 
+def expandir_contramarcas(campo):
+    """Expande el formato abreviado de contramarcas del remito, ej.
+    'C164/65/66/67/68/69/70/71/72/73/74' -> ['C164','C165',...,'C174'].
+    Sirve como lista de codigos validos para validar/corregir lo leido por OCR
+    en el sanitario provisorio (que a veces confunde digitos, ej. C165->C185)."""
+    if not campo:
+        return []
+    partes = [p.strip() for p in re.split(r'[/,]', campo) if p.strip()]
+    if not partes:
+        return []
+    primero = re.sub(r'\D', '', partes[0])
+    if not primero:
+        return []
+    base_len = len(primero)
+    numeros = [int(primero)]
+    for p in partes[1:]:
+        p_digits = re.sub(r'\D', '', p)
+        if not p_digits:
+            continue
+        if len(p_digits) < base_len:
+            prefijo = primero[:base_len - len(p_digits)]
+            numeros.append(int(prefijo + p_digits))
+        else:
+            numeros.append(int(p_digits))
+    return ['C' + str(n) for n in numeros]
+
+
 def limpiar_num(s):
     if not s: return None
     s = str(s).strip().replace(' ', '')
@@ -373,7 +447,7 @@ def ocr_pdf(pdf_bytes):
         pdf_path = os.path.join(tmpdir, 'input.pdf')
         with open(pdf_path, 'wb') as f: f.write(pdf_bytes)
         out_prefix = os.path.join(tmpdir, 'page')
-        subprocess.run(['pdftoppm', '-r', '150', '-l', '1', '-jpeg', pdf_path, out_prefix],
+        subprocess.run(['pdftoppm', '-r', '300', '-l', '1', '-jpeg', pdf_path, out_prefix],
             check=True, capture_output=True)
         archivos = sorted([f for f in os.listdir(tmpdir) if f.startswith('page') and f.endswith('.jpg')])
         for nombre in archivos:
@@ -400,18 +474,21 @@ def leer_sanitario_provisorio(pdf_bytes):
     datos['fecha_emision'] = datetime.datetime.now().strftime('%d/%m/%Y')
 
     # Contramarca por linea, en el orden en que aparecen (formato USA con anexo,
-    # ej. "55 ... - C208 ( Fecha de Faena: ... )"). El OCR confunde 'C' con '0'
-    # a veces (ej. '0208'), por eso se acepta cualquiera de los dos. La fecha de
-    # faena de esta linea NO se usa (viene poco confiable del OCR) - se usa la
-    # del piqueo por producto en su lugar; esto solo ancla el match a filas de
-    # producto reales (evita matchear el resumen "CONTRAMARCA:C208/C209/...").
+    # ej. "55 ... - C208 ( Fecha de Faena: ... )"). El OCR a veces confunde la
+    # 'C' del codigo con otro caracter (0, 9, etc.) - se ignora ese caracter y
+    # se reconstruye siempre con 'C' + los digitos. El numero de cajas al
+    # principio de la linea es opcional porque el OCR a veces lo pierde del
+    # todo (ej. una linea entera sin numero visible). La fecha de faena de esta
+    # linea NO se usa (viene poco confiable del OCR) - se usa la del piqueo por
+    # producto en su lugar; esto solo ancla el match a filas de producto reales
+    # (evita matchear el resumen "CONTRAMARCA:C208/C209/...").
     lineas_usa = []
     patron_linea = re.compile(
-        r'(\d+)[^\n]*?-\s*[C0](\d+)\s*\(\s*Fecha de Faena',
-        re.IGNORECASE
+        r'^\s*(\d+)?([^\n]*?)-\s*[A-Za-z0-9](\d{2,4})\s*\(\s*Fecha de Faena',
+        re.IGNORECASE | re.MULTILINE
     )
     for m in patron_linea.finditer(texto):
-        lineas_usa.append({'cajas': m.group(1), 'contramarca': 'C' + m.group(2)})
+        lineas_usa.append({'cajas': m.group(1), 'texto': (m.group(2) or '').upper(), 'contramarca': 'C' + m.group(3)})
     datos['lineas_usa'] = lineas_usa
 
     return datos
