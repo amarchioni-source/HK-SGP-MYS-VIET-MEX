@@ -59,6 +59,12 @@ def generar():
         if datos_remito.get('es_congelado') is not None:
             datos['es_congelado'] = datos_remito['es_congelado']
         lotes_map = datos_piqueo.get('lotes_por_producto', {})
+        fecha_prod_map  = datos_piqueo.get('fecha_produccion_por_producto', {})
+        fecha_faena_map = datos_piqueo.get('fecha_faena_por_producto', {})
+        lineas_usa = datos_prov.get('lineas_usa', [])
+        lineas_usa_por_cajas = {}
+        for l in lineas_usa:
+            lineas_usa_por_cajas.setdefault(l['cajas'], []).append(l)
         for prod in datos.get('productos', []):
             cod = prod.get('codigo', '')
             if cod in reporte.get('descripciones', {}):
@@ -66,12 +72,18 @@ def generar():
             else:
                 prod['nombre_en'] = buscar_nombre_en(prod.get('nombre_es', ''))
             prod['lotes'] = lotes_map.get(cod, '')
+            prod['fecha_produccion_prod'] = fecha_prod_map.get(cod, '')
+            prod['fecha_faena_prod']      = fecha_faena_map.get(cod, '')
+            candidatos = lineas_usa_por_cajas.get(str(prod.get('cajas', '')), [])
+            if len(candidatos) == 1:
+                prod['contramarca'] = candidatos[0]['contramarca']
 
         PATRONES_DESTINO = {
-            'malasia':    'alasia',
-            'singapur':   'ingapur',
-            'mexico':     'exico',
-            'usawclass': 'class',
+            'malasia':     'alasia',
+            'singapur':    'ingapur',
+            'mexico':      'exico',
+            'usawclass':   'class',
+            'usaorleans':  'orleans',
         }
         patron_via = 'aereo' if tipo_via == 'aereo' else 'mar'
         patron_dest = PATRONES_DESTINO.get(destino, PATRONES_DESTINO['malasia'])
@@ -157,7 +169,9 @@ def leer_piqueo(file):
     prod_min  = prod_max  = None
     venc_min  = venc_max  = None
     pallets_set = set()
-    lotes_por_cod = {}  # Cod Prod -> set de fechas 'Fecha P' (YYYYMMDD), para Nº de lotes (ej. Mexico)
+    lotes_por_cod = {}        # Cod Prod -> set de fechas 'Fecha P' (YYYYMMDD), para Nº de lotes (ej. Mexico)
+    prod_fechas_por_cod = {}   # Cod Prod -> [fecha_p_min, fecha_p_max] (rango de produccion por producto, ej. Orleans)
+    faena_fechas_por_cod = {}  # Cod Prod -> [fecha_f_min, fecha_f_max] (rango de faena por producto, ej. Orleans)
 
     for row in rows[hdr_idx + 1:]:
         if not row: continue
@@ -175,10 +189,14 @@ def leer_piqueo(file):
         if isinstance(fecha_f, datetime.datetime):
             faena_min = min(faena_min, fecha_f) if faena_min else fecha_f
             faena_max = max(faena_max, fecha_f) if faena_max else fecha_f
+            fmin, fmax = faena_fechas_por_cod.get(cod, (fecha_f, fecha_f))
+            faena_fechas_por_cod[cod] = (min(fmin, fecha_f), max(fmax, fecha_f))
         if isinstance(fecha_p, datetime.datetime):
             prod_min = min(prod_min, fecha_p) if prod_min else fecha_p
             prod_max = max(prod_max, fecha_p) if prod_max else fecha_p
             lotes_por_cod.setdefault(cod, set()).add(fecha_p.strftime('%Y%m%d'))
+            pmin, pmax = prod_fechas_por_cod.get(cod, (fecha_p, fecha_p))
+            prod_fechas_por_cod[cod] = (min(pmin, fecha_p), max(pmax, fecha_p))
         if isinstance(fecha_v, datetime.datetime):
             venc_min = min(venc_min, fecha_v) if venc_min else fecha_v
             venc_max = max(venc_max, fecha_v) if venc_max else fecha_v
@@ -193,6 +211,12 @@ def leer_piqueo(file):
     lotes_por_producto = {
         cod: ' - '.join(sorted(fechas)) for cod, fechas in lotes_por_cod.items()
     }
+    fecha_produccion_por_producto = {
+        cod: fmt_rango(pmin, pmax) for cod, (pmin, pmax) in prod_fechas_por_cod.items()
+    }
+    fecha_faena_por_producto = {
+        cod: fmt_rango(fmin, fmax) for cod, (fmin, fmax) in faena_fechas_por_cod.items()
+    }
 
     return {
         'fecha_faena':       fmt_rango(faena_min, faena_max),
@@ -200,6 +224,8 @@ def leer_piqueo(file):
         'fecha_vencimiento': fmt_rango(venc_min,  venc_max),
         'pallets_piqueo':    str(len(pallets_set)) if pallets_set else None,
         'lotes_por_producto': lotes_por_producto,
+        'fecha_produccion_por_producto': fecha_produccion_por_producto,
+        'fecha_faena_por_producto': fecha_faena_por_producto,
     }
 
 
@@ -372,6 +398,22 @@ def leer_sanitario_provisorio(pdf_bytes):
     else:
         datos['es_congelado'] = False
     datos['fecha_emision'] = datetime.datetime.now().strftime('%d/%m/%Y')
+
+    # Contramarca por linea, en el orden en que aparecen (formato USA con anexo,
+    # ej. "55 ... - C208 ( Fecha de Faena: ... )"). El OCR confunde 'C' con '0'
+    # a veces (ej. '0208'), por eso se acepta cualquiera de los dos. La fecha de
+    # faena de esta linea NO se usa (viene poco confiable del OCR) - se usa la
+    # del piqueo por producto en su lugar; esto solo ancla el match a filas de
+    # producto reales (evita matchear el resumen "CONTRAMARCA:C208/C209/...").
+    lineas_usa = []
+    patron_linea = re.compile(
+        r'(\d+)[^\n]*?-\s*[C0](\d+)\s*\(\s*Fecha de Faena',
+        re.IGNORECASE
+    )
+    for m in patron_linea.finditer(texto):
+        lineas_usa.append({'cajas': m.group(1), 'contramarca': 'C' + m.group(2)})
+    datos['lineas_usa'] = lineas_usa
+
     return datos
 
 
@@ -697,6 +739,8 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
         xml, al = _gen_mexico_maritimo(xml, datos)
     elif destino == 'usawclass':
         xml, al = _gen_usa_wclass(xml, datos)
+    elif destino == 'usaorleans':
+        xml, al = _gen_usa_orleans(xml, datos)
     else:
         if tipo_via == 'aereo':
             xml, al = _gen_malasia_aereo(xml, datos)
@@ -1124,6 +1168,105 @@ def _gen_usa_wclass(xml, datos):
 
     # Fecha de emisión (pie del certificado)
     xml = xml.replace('>13/07/2026<', '>' + fecha_emi + '<')
+
+    return xml, alertas
+
+
+# ── USA ORLEANS ───────────────────────────────────────────────────────────────
+# Detalle producto por producto en un ANEXO (pagina aparte), 2 filas por producto
+# (ES/EN) igual que Wclass. A diferencia de Wclass, cada producto tiene su propia
+# Contramarca, Fecha de faena y Fecha de produccion/Lote (via piqueo por Cod Prod
+# y provisorio por linea, cruzados por cajas+neto+bruto).
+
+def _gen_usa_orleans(xml, datos):
+    alertas = []
+    trs = get_trs(xml)
+
+    _, _, _, primera_idx = _get_fila_por_contenido(xml, trs, 'PRODUCTO CRUDO INTACTO')
+    if primera_idx is None:
+        return xml, ['No se encontro la fila modelo de productos en la plantilla Orleans']
+
+    total_idx = None
+    for i in range(primera_idx, len(trs)):
+        fila, _, _ = get_fila_xml(xml, trs, i)
+        if 'Totales' in fila:
+            total_idx = i
+            break
+    if total_idx is None:
+        return xml, ['No se encontro la fila de Totales del anexo en la plantilla Orleans']
+
+    fila_es, ini_mod, _ = get_fila_xml(xml, trs, primera_idx)
+    fila_en, _, _       = get_fila_xml(xml, trs, primera_idx + 1)
+    ini_totales = trs[total_idx].start()
+
+    nuevas_filas = ''
+    for prod in datos.get('productos', []):
+        contramarca = prod.get('contramarca', '') or ''
+        f_faena = prod.get('fecha_faena_prod', '') or ''
+        f_prod  = prod.get('fecha_produccion_prod', '') or ''
+        if not contramarca: alertas.append('Producto ' + prod.get('codigo', '') + ': contramarca no encontrada - completar manualmente')
+        if not f_faena:      alertas.append('Producto ' + prod.get('codigo', '') + ': fecha de faena no encontrada - completar manualmente')
+        if not f_prod:       alertas.append('Producto ' + prod.get('codigo', '') + ': fecha de produccion no encontrada - completar manualmente')
+
+        f_faena_fmt = fmt_fecha_al_to_usa(f_faena)
+        f_prod_fmt  = fmt_fecha_al_to_usa(f_prod)
+        lote_fmt    = fecha_a_lote_usa(f_prod)
+        neto_kg  = formatear_miles(prod.get('neto', '')) + ' KGS'
+        neto_lbs = formatear_miles(kg_a_lbs(prod.get('neto', ''))) + ' LBS'
+
+        nueva_es = fila_es
+        nueva_es = _reemplazar_celda(nueva_es, 0, str(prod.get('cajas', '')))
+        nueva_es = _reemplazar_celda(nueva_es, 1, (prod.get('nombre_es', '') or '').strip().upper())
+        nueva_es = _reemplazar_celda(nueva_es, 5, f_faena_fmt)
+        nueva_es = _reemplazar_celda(nueva_es, 6, f_prod_fmt)
+        nueva_es = _reemplazar_celda(nueva_es, 7, contramarca)
+        nueva_es = _reemplazar_celda(nueva_es, 8, lote_fmt)
+        nueva_es = _reemplazar_celda(nueva_es, 9, neto_kg)
+
+        nueva_en = fila_en
+        nueva_en = _reemplazar_celda(nueva_en, 1, (prod.get('nombre_en', '') or '').strip().upper())
+        nueva_en = _reemplazar_celda(nueva_en, 5, f_faena_fmt)
+        nueva_en = _reemplazar_celda(nueva_en, 6, f_prod_fmt)
+        nueva_en = _reemplazar_celda(nueva_en, 7, contramarca)
+        nueva_en = _reemplazar_celda(nueva_en, 8, lote_fmt)
+        nueva_en = _reemplazar_celda(nueva_en, 9, neto_lbs)
+
+        nuevas_filas += nueva_es + nueva_en
+
+    xml = xml[:ini_mod] + nuevas_filas + xml[ini_totales:]
+
+    # Totales (aparecen 2 veces: resumen en pagina 1 "VER ANEXO" y al pie del anexo)
+    total_cajas = str(datos.get('total_cajas', '') or '')
+    total_neto_fmt = formatear_miles(datos.get('total_neto', ''))
+    total_lbs_fmt  = formatear_miles(kg_a_lbs(datos.get('total_neto', '')))
+    if total_cajas:
+        xml = re.sub(r'\b1170\b', total_cajas, xml)
+    if total_neto_fmt:
+        xml = re.sub(r'21284,00(\s*KGS)', total_neto_fmt + r'\1', xml)
+    if total_lbs_fmt:
+        xml = re.sub(r'46923,13(\s*LBS)', total_lbs_fmt + r'\1', xml)
+
+    # Transporte (buque - Orleans es maritimo)
+    transporte = datos.get('transporte', '') or ''
+    if transporte: xml = xml.replace('MAERSK MONTE AZUL', transporte)
+
+    # Contenedor
+    contenedor = datos.get('contenedor', '') or ''
+    if contenedor: xml = xml.replace('MNBU3586542', contenedor)
+    if not contenedor: alertas.append('Contenedor no encontrado - completar manualmente')
+
+    # Precinto (un solo campo en esta plantilla - se usa el de AFIP)
+    precinto = datos.get('precinto_afip') or datos.get('precinto_senasa') or ''
+    if precinto: xml = xml.replace('BAH74541', precinto)
+    if not precinto: alertas.append('Precinto no encontrado - completar manualmente')
+
+    # Fecha limite de conservacion (I.15)
+    f_venc_fmt = fmt_fecha_al_to_usa(datos.get('fecha_vencimiento', '') or '')
+    if f_venc_fmt: xml = xml.replace('26/08/2026 al/to 30/10/2026', f_venc_fmt)
+
+    # Fecha de emision (aparece 2 veces: certificacion pag.2 y firma del anexo pag.3)
+    fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
+    xml = xml.replace('21/07/2026', fecha_emi)
 
     return xml, alertas
 
