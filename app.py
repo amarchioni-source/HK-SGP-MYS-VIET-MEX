@@ -392,7 +392,13 @@ def leer_remito(pdf_bytes):
             datos['transporte'] = transport
             datos['tipo_transporte'] = 'maritimo'
     m_cont = re.search(r'CONTAINER[:\s]*([A-Z]{4}\d{6,7}-?\d?)', texto, re.IGNORECASE)
-    datos['contenedor'] = m_cont.group(1).strip() if m_cont else None
+    contenedor = m_cont.group(1).strip() if m_cont else None
+    if contenedor and '-' not in contenedor:
+        # Formato estandar ISO 6346: 4 letras + 6 digitos de serie + guion + 1 digito verificador
+        m_iso = re.match(r'^([A-Z]{4}\d{6})(\d)$', contenedor)
+        if m_iso:
+            contenedor = m_iso.group(1) + '-' + m_iso.group(2)
+    datos['contenedor'] = contenedor
     m_ps = re.search(r'P\.S\.[:\s]+([A-Z0-9/]+)', texto)
     m_pa = re.search(r'P\.A\.[:\s]+([A-Z]{2,3}\s?\d{4,8})', texto)
     datos['precinto_senasa'] = m_ps.group(1).strip() if m_ps else None
@@ -413,7 +419,7 @@ def leer_remito(pdf_bytes):
     i = 0
     while i < len(lineas):
         linea = lineas[i].strip()
-        if re.match(r'^CD\d+$', linea):
+        if re.match(r'^[A-Z]{1,4}\d+$', linea):
             codigo    = linea
             desc      = lineas[i+1].strip() if i+1 < len(lineas) else ''
             cajas     = lineas[i+2].strip() if i+2 < len(lineas) else ''
@@ -650,25 +656,36 @@ def _get_fila_por_contenido(xml, trs, texto_clave):
 
 
 def _reemplazar_pallets_en_fila(fila_xml, pallets, kg_pallets):
+    # El conteo de pallets puede aparecer 2 veces en la misma fila bilingue (ES y
+    # EN). Segun como haya fusionado _merge_runs_xml los runs, el numero puede
+    # quedar: (a) embebido en el mismo run que el texto "ACONDICIONADO EN"/
+    # "ACONDITIONED IN" (fusion exitosa), o (b) en su propio run aislado (no se
+    # fusiono, tenia formato distinto). Se cubren ambos casos.
     fila_xml = re.sub(r'(ACONDICIONADO EN\s*)\d+(\s*PALLET)', r'\g<1>' + str(pallets) + r'\2', fila_xml)
     fila_xml = re.sub(r'(ACONDITIONED IN\s*)\d+(\s*PALLET)', r'\g<1>' + str(pallets) + r'\2', fila_xml)
-    fila_xml = fila_xml.replace('<w:t>' + str(pallets) + '</w:t>', '<w:t>' + str(pallets) + '</w:t>', 1)
-    # Reemplazar numero separado - buscar w:t con solo digitos pequeños
-    for viejo in ['<w:t>1</w:t>', '<w:t>4</w:t>', '<w:t>14</w:t>', '<w:t>19</w:t>', '<w:t>20</w:t>']:
-        if viejo in fila_xml:
-            fila_xml = fila_xml.replace(viejo, '<w:t>' + str(pallets) + '</w:t>', 1)
-            break
+
+    def _reemplazar_numero_run(m):
+        contenido = m.group(1)
+        if contenido.strip().isdigit():
+            sufijo = ' ' if contenido.endswith(' ') and not contenido.endswith('  ') else ''
+            return m.group(0).replace(contenido, str(pallets) + sufijo, 1)
+        return m.group(0)
+    fila_xml = re.sub(r'<w:t[^>]*>([^<]*)</w:t>', _reemplazar_numero_run, fila_xml)
+
     if kg_pallets:
         # Caso generico: el numero de KGS esta en el mismo run que el texto "KGS)" (ej. Mexico)
         nueva_fila, n = re.subn(r'[\d\.]+(\s*KGS\))', str(kg_pallets) + r'\1', fila_xml, count=1)
         if n:
             fila_xml = nueva_fila
         else:
-            # Fallback: numero de KGS aislado en su propio w:t (plantillas viejas)
-            for viejo_kg in ['<w:t>32.44</w:t>', '<w:t>151.77</w:t>', '<w:t>664.35</w:t>']:
-                if viejo_kg in fila_xml:
-                    fila_xml = fila_xml.replace(viejo_kg, '<w:t>' + str(kg_pallets) + '</w:t>')
-                    break
+            # Fallback generico: run con formato de numero decimal aislado (plantillas viejas,
+            # ej. Malasia/Singapur con el numero de KGS en su propio run separado del texto)
+            def _reemplazar_decimal_run(m):
+                contenido = m.group(1)
+                if re.match(r'^\d+[.,]\d+$', contenido.strip()):
+                    return m.group(0).replace(contenido, str(kg_pallets), 1)
+                return m.group(0)
+            fila_xml = re.sub(r'<w:t[^>]*>([^<]*)</w:t>', _reemplazar_decimal_run, fila_xml)
     return fila_xml
 
 
@@ -695,7 +712,7 @@ def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx_fallback,
             lotes=prod.get('lotes', ''), lotes_celda=lotes_celda
         )
 
-    nueva_pal = _reemplazar_pallets_en_fila(fila_pal, pallets, kg_pallets) if fila_pal else ''
+    nueva_pal = _reemplazar_pallets_en_fila(fila_pal, pallets, kg_pallets) if (fila_pal and pallets) else fila_pal
 
     if sumar_pallet_a_bruto:
         try:
@@ -1146,53 +1163,64 @@ def _gen_mexico_maritimo(xml, datos):
 # ── TEMPERATURA SINGAPUR ─────────────────────────────────────────────────────
 
 def _set_temperatura_singapur(xml, es_congelado, tipo_via):
-    """Todas las plantillas tienen X en refrigeracion por defecto.
-    Si es congelado, mover X a congelacion. Si es enfriado, dejar en refrigeracion."""
+    """Todas las plantillas tienen X en refrigeracion por defecto (en la fila en
+    español Y en la fila en ingles, que son filas separadas). Si es congelado,
+    mover la X a congelacion/frozen en AMBAS filas. Si es enfriado, no hacer nada."""
     if not es_congelado:
-        return xml  # X ya esta en refrigeracion, no hacer nada
+        return xml
 
-    # Es congelado: buscar la fila de temperatura y mover la X
-    trs = list(re.finditer(r'<w:tr[ >]', xml))
-    for i, m in enumerate(trs):
-        ini = m.start()
-        fin = trs[i+1].start() if i+1 < len(trs) else len(xml)
-        fila = xml[ini:fin]
-        txt = ''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', fila))
-        if 'efrigerac' not in txt or 'ongela' not in txt:
-            continue
-        if 'X' not in fila:
-            continue
-        # Fila de temperatura: quitar X de refrigeracion
-        nueva_fila = fila.replace('<w:t>X</w:t>', '<w:t></w:t>', 1)
-        # Poner X en la celda siguiente a "De congelacion"
-        # La celda de congelacion tiene el label, la siguiente es el checkbox (vacio)
-        celda_starts = [m2.start() for m2 in re.finditer(r'<w:tc>', nueva_fila)]
-        celda_ends   = [m2.start() for m2 in re.finditer(r'</w:tc>', nueva_fila)]
-        for idx_c, (cs, ce) in enumerate(zip(celda_starts, celda_ends)):
-            bloque = nueva_fila[cs:ce]
-            if 'ongela' in ''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', bloque)):
-                # La siguiente celda es el checkbox de congelacion
-                if idx_c + 1 < len(celda_starts):
-                    cs2 = celda_starts[idx_c + 1]
-                    ce2 = celda_ends[idx_c + 1]
-                    bloque2 = nueva_fila[cs2:ce2]
-                    # Si tiene w:t vacio, reemplazarlo; si no, insertar antes de </w:tc>
-                    if '<w:t></w:t>' in bloque2:
-                        nuevo_bloque2 = bloque2.replace('<w:t></w:t>', '<w:t>X</w:t>', 1)
-                    elif re.search(r'<w:t[^>]*></w:t>', bloque2):
-                        nuevo_bloque2 = re.sub(r'<w:t[^>]*></w:t>', '<w:t>X</w:t>', bloque2, count=1)
-                    else:
-                        # Insertar w:r con w:t>X antes de </w:tc>
-                        # Buscar el ultimo </w:p> para insertar el run ahi
-                        insert_pos = bloque2.rfind('</w:p>')
-                        if insert_pos >= 0:
-                            nuevo_bloque2 = bloque2[:insert_pos] + '<w:r><w:t>X</w:t></w:r>' + bloque2[insert_pos:]
-                        else:
-                            nuevo_bloque2 = bloque2
-                    nueva_fila = nueva_fila[:cs2] + nuevo_bloque2 + nueva_fila[ce2:]
-                break
-        xml = xml[:ini] + nueva_fila + xml[fin:]
-        break
+    cambiado = True
+    intentos = 0
+    while cambiado and intentos < 10:
+        cambiado = False
+        intentos += 1
+        trs = list(re.finditer(r'<w:tr[ >]', xml))
+        for i, m in enumerate(trs):
+            ini = m.start()
+            fin = trs[i+1].start() if i+1 < len(trs) else len(xml)
+            fila = xml[ini:fin]
+            txt_low = ''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', fila)).lower()
+            tiene_refrig = 'efrigera' in txt_low          # cubre "Refrigeración" y "Refrigerated"
+            tiene_congel = 'ongela' in txt_low or 'rozen' in txt_low  # cubre "congelación" y "Frozen"
+            if not (tiene_refrig and tiene_congel):
+                continue
+
+            celda_starts = [m2.start() for m2 in re.finditer(r'<w:tc>', fila)]
+            celda_ends   = [m2.start() for m2 in re.finditer(r'</w:tc>', fila)]
+            idx_refrig = idx_congel = None
+            for idx_c, (cs, ce) in enumerate(zip(celda_starts, celda_ends)):
+                label_low = ''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', fila[cs:ce])).lower()
+                if 'efrigera' in label_low: idx_refrig = idx_c
+                if 'ongela' in label_low or 'rozen' in label_low: idx_congel = idx_c
+            if idx_refrig is None or idx_congel is None:
+                continue
+            if idx_refrig + 1 >= len(celda_starts) or idx_congel + 1 >= len(celda_starts):
+                continue
+
+            cs_r, ce_r = celda_starts[idx_refrig + 1], celda_ends[idx_refrig + 1]
+            if '<w:t>X</w:t>' not in fila[cs_r:ce_r]:
+                continue  # esta fila ya tiene la X movida (evita reprocesarla en la siguiente pasada)
+
+            nueva_fila = fila[:cs_r] + fila[cs_r:ce_r].replace('<w:t>X</w:t>', '<w:t></w:t>', 1) + fila[ce_r:]
+
+            # Recalcular offsets de celdas sobre la fila ya modificada para ubicar el checkbox de congelacion
+            celda_starts2 = [m2.start() for m2 in re.finditer(r'<w:tc>', nueva_fila)]
+            celda_ends2   = [m2.start() for m2 in re.finditer(r'</w:tc>', nueva_fila)]
+            cs2, ce2 = celda_starts2[idx_congel + 1], celda_ends2[idx_congel + 1]
+            bloque2 = nueva_fila[cs2:ce2]
+            if '<w:t></w:t>' in bloque2:
+                nuevo_bloque2 = bloque2.replace('<w:t></w:t>', '<w:t>X</w:t>', 1)
+            elif re.search(r'<w:t[^>]*></w:t>', bloque2):
+                nuevo_bloque2 = re.sub(r'<w:t[^>]*></w:t>', '<w:t>X</w:t>', bloque2, count=1)
+            else:
+                insert_pos = bloque2.rfind('</w:p>')
+                nuevo_bloque2 = (bloque2[:insert_pos] + '<w:r><w:t>X</w:t></w:r>' + bloque2[insert_pos:]
+                                 if insert_pos >= 0 else bloque2)
+            nueva_fila = nueva_fila[:cs2] + nuevo_bloque2 + nueva_fila[ce2:]
+
+            xml = xml[:ini] + nueva_fila + xml[fin:]
+            cambiado = True
+            break  # posiciones de trs cambiaron - reiniciar el escaneo desde cero
     return xml
 
 
