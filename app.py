@@ -824,6 +824,19 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
         else:
             xml, al = _gen_malasia_maritimo(xml, datos)
     alertas.extend(al)
+
+    # Red de seguridad: si por algun bug el XML quedo mal formado, no entregar
+    # un .docx roto (Word no lo puede ni abrir) - mejor fallar con un error claro.
+    try:
+        from xml.etree import ElementTree as ET
+        ET.fromstring(xml)
+    except ET.ParseError as e:
+        raise ValueError(
+            'El documento generado quedo con XML invalido (' + str(e) + '). '
+            'No se genero el archivo para evitar entregar un .docx corrupto - '
+            'avisar para revisar el generador de este destino.'
+        )
+
     archivos['word/document.xml'] = xml.encode('utf-8')
     out = io.BytesIO()
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
@@ -980,7 +993,7 @@ def _gen_malasia_maritimo(xml, datos):
     try: dia, mes, anio = fecha_emi.split('/')
     except: dia = mes = anio = ''; alertas.append('Fecha emision no parseada')
     xml = xml.replace('>:      2026<', '>:      ' + anio + '<')
-    xml = re.sub(r'>\)\s+\d{2}\s+<', ')         ' + mes + ' <', xml, count=1)
+    xml = re.sub(r'>\)\s+\d{2}\s+<', '>)         ' + mes + ' <', xml, count=1)
     xml = xml.replace('>14<', '>' + dia + '<', 1)
     return xml, alertas
 
