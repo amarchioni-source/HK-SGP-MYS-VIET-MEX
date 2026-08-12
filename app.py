@@ -1125,13 +1125,6 @@ def _gen_mexico_maritimo(xml, datos):
     total_neto_fmt  = formatear_miles(datos.get('total_neto', ''))
     total_bruto_fmt = formatear_miles(datos.get('total_bruto', ''))
 
-    for prod in datos.get('productos', []):
-        if buscar_info_mexico(prod.get('desc_original', '')) is None:
-            alertas.append(
-                'Corte "' + prod.get('desc_original', prod.get('nombre_es', ''))
-                + '" no esta en la tabla de nombres de Mexico - se uso el nombre generico, revisar manualmente'
-            )
-
     xml = _reemplazar_bloque_productos(
         xml, trs, primera_idx=5, total_idx_fallback=13,
         productos=datos.get('productos', []),
