@@ -508,6 +508,9 @@ MAPA_EN = {
     'LOMO SIN CORDON':           'TENDERLOIN CHAIN OFF',
     'LOMO S/ CORDON':            'TENDERLOIN CHAIN OFF',
     'LOMO SC':                   'TENDERLOIN CHAIN OFF',
+    'LOMO CON CORDON':           'BEEF TENDERLOIN',
+    'LOMO C/ CORDON':            'BEEF TENDERLOIN',
+    'LOMO CC':                   'BEEF TENDERLOIN',
     'NALGA DE ADENTRO CON TAPA': 'TOPSIDE CAP ON',
     'NALGA CON TAPA':            'TOPSIDE CAP ON',
     'NALGA SIN TAPA':            'TOPSIDE CAP OFF',
@@ -581,6 +584,16 @@ MAPA_MEXICO = {
 CLAVES_MEXICO = sorted(MAPA_MEXICO.keys(), key=len, reverse=True)
 
 
+def limpiar_desc_mexico(desc_original):
+    """Limpia la descripcion cruda del remito para usarla como nombre de
+    respaldo cuando el corte no esta en MAPA_MEXICO: se queda con todo lo que
+    esta antes de '(MEX)' (los calificadores como GF/MC/AA van despues)."""
+    d = (desc_original or '').upper()
+    if '(MEX)' in d:
+        d = d.split('(MEX)')[0]
+    return d.strip()
+
+
 def buscar_info_mexico(desc_original):
     """Busca el corte dentro de la descripcion cruda del remito (ej.
     'NALGA DE AFUERA C/TORTGUITA (MEX) GF') y devuelve su info de Mexico,
@@ -595,15 +608,22 @@ def buscar_info_mexico(desc_original):
 def armar_nombre_mexico(prod):
     """Arma el nombre de 3 partes 'ES/ PULPA / EN' (o 2 partes 'ES / EN' si
     el corte no lleva pulpa) para el certificado de Mexico. Si el corte no
-    esta en MAPA_MEXICO, cae al nombre bilingue generico (mejor avisar con
-    una alerta manualmente que dejar la celda vacia)."""
+    esta en MAPA_MEXICO (todavia no se le agrego el calificador de pulpa,
+    si le corresponde), se arma un nombre de 2 partes igual de valido usando
+    la descripcion completa del remito - no queda nunca en blanco ni con un
+    nombre generico de una sola palabra, sea cual sea el corte."""
     info = buscar_info_mexico(prod.get('desc_original', ''))
-    if info is None:
-        return armar_nombre_bilingue(prod.get('nombre_es', ''), prod.get('nombre_en', ''))
-    es, pulpa, en = info['es'], info['pulpa'], info['en']
-    if pulpa:
-        return es + '/ ' + pulpa + ' / ' + en
-    return es + ' / ' + en
+    if info is not None:
+        es, pulpa, en = info['es'], info['pulpa'], info['en']
+        if pulpa:
+            return es + '/ ' + pulpa + ' / ' + en
+        return es + ' / ' + en
+
+    es_generico = limpiar_desc_mexico(prod.get('desc_original', '')) or (prod.get('nombre_es', '') or '').strip().upper()
+    en_generico = (prod.get('nombre_en', '') or buscar_nombre_en(es_generico) or '').strip().upper()
+    if en_generico and en_generico != es_generico:
+        return es_generico + ' / ' + en_generico
+    return es_generico
 
 
 # ── XML HELPERS ──────────────────────────────────────────────────────────────
