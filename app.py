@@ -544,21 +544,34 @@ MAPA_EN = {
 NOMBRES_PRODUCTO = sorted(MAPA_EN.keys(), key=len, reverse=True)
 
 
+def extraer_calibre(desc):
+    """Extrae el calibre/talle de una descripcion de remito (ej. '3/4 LBS',
+    '+5 LBS', '-1,3 KG', '+1,3 KG'), para que no se pierda al simplificar el
+    nombre del producto. Aplica a cualquier corte, no solo LOMO - antes solo
+    se agregaba el calibre para LOMO, perdiendose en cortes como TAPA DE
+    CUADRIL (que puede venir en variantes -1,3 KG / +1,3 KG)."""
+    m = re.search(r'([+\-]\s*\d+(?:[/,.]\d+)?\s*(?:KG|LBS)|\d+/\d+\s*(?:KG|LBS))', desc, re.IGNORECASE)
+    return m.group(1).strip() if m else ''
+
+
 def buscar_nombre_es_remito(desc):
     d = desc.upper()
     for nombre in NOMBRES_PRODUCTO:
         if nombre in d:
-            lbs_m = re.search(r'(\d/\d\s*LBS|\+\s*\d\s*LBS|\+5\s*LBS)', desc, re.IGNORECASE)
-            if lbs_m and 'LOMO' in nombre:
-                return nombre + ' ' + lbs_m.group(1).strip()
+            calibre = extraer_calibre(desc)
+            if calibre:
+                return nombre + ' ' + calibre
             return nombre
     return desc
 
 
 def buscar_nombre_en(nombre_es):
     n = nombre_es.upper()
+    calibre_m = re.search(r'([+\-]\s*\d+(?:[/,.]\d+)?\s*(?:KG|LBS)|\d+/\d+\s*(?:KG|LBS))', n, re.IGNORECASE)
+    calibre = calibre_m.group(1).strip() if calibre_m else ''
     for clave, en in sorted(MAPA_EN.items(), key=lambda x: len(x[0]), reverse=True):
-        if clave in n: return en
+        if clave in n:
+            return (en + ' ' + calibre).strip() if calibre else en
     return ''
 
 
