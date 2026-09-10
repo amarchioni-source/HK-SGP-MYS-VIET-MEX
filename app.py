@@ -644,7 +644,15 @@ def _reemplazar_celda(xml_fila, celda_idx, nuevo_texto):
     if celda_idx >= len(celda_starts): return xml_fila
     bloque = xml_fila[celda_starts[celda_idx]:celda_ends[celda_idx]]
     textos = re.findall(r'<w:t[^>]*>[^<]*</w:t>', bloque)
-    if not textos: return xml_fila
+    if not textos:
+        # Celda sin ningun <w:t> (vacia de verdad, sin ni siquiera un run vacio):
+        # insertar un run nuevo antes de cerrar el ultimo parrafo, en vez de
+        # descartar el valor en silencio (eso escondia errores de indice de celda).
+        insert_pos = bloque.rfind('</w:p>')
+        if insert_pos < 0:
+            return xml_fila
+        nuevo_bloque = bloque[:insert_pos] + '<w:r><w:t>' + nuevo_texto + '</w:t></w:r>' + bloque[insert_pos:]
+        return xml_fila[:celda_starts[celda_idx]] + nuevo_bloque + xml_fila[celda_ends[celda_idx]:]
     primer   = textos[0]
     tag_open = re.match(r'<w:t[^>]*>', primer).group()
     nuevo_bloque = bloque.replace(primer, tag_open + nuevo_texto + '</w:t>', 1)
@@ -715,7 +723,18 @@ def _reemplazar_bloque_productos(xml, trs, primera_idx, total_idx_fallback,
                                   lotes_celda=None, sumar_pallet_a_bruto=True,
                                   total_replacer=None, armar_nombre_func=None):
     fila_pal, ini_pal, fin_pal, idx_pal = _get_fila_por_contenido(xml, trs, 'ACONDICIONADO EN')
-    total_idx = (idx_pal + 1) if idx_pal is not None else total_idx_fallback
+    total_idx = None
+    if idx_pal is not None:
+        # Buscar la primera fila con contenido real despues de la fila de pallets -
+        # puede haber filas vacias "espaciadoras" de por medio antes de la fila de
+        # totales real, y asumir siempre "+1" rompe en esos casos.
+        for j in range(idx_pal + 1, len(trs)):
+            fila_candidata, _, _ = get_fila_xml(xml, trs, j)
+            if re.search(r'<w:t[^>]*>[^<]+</w:t>', fila_candidata):
+                total_idx = j
+                break
+    if total_idx is None:
+        total_idx = total_idx_fallback
 
     fila_modelo, ini_mod, _ = get_fila_xml(xml, trs, primera_idx)
     fila_total, ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx)
@@ -981,7 +1000,8 @@ def _gen_malasia_aereo(xml, datos):
         productos=datos.get('productos', []),
         total_cajas=datos.get('total_cajas',''), total_neto=datos.get('total_neto',''), total_bruto=datos.get('total_bruto',''),
         pallets=datos.get('pallets','1'), kg_pallets=datos.get('kg_pallets',''),
-        neto_celda=6, bruto_celda=7
+        neto_celda=6, bruto_celda=7,
+        total_replacer=lambda fila, tc, tn, tb: _reemplazar_total_celdas(fila, tc, tn, tb, cajas_celda=0, neto_celda=2, bruto_celda=3)
     )
     f_faena = datos.get('fecha_faena','')
     f_prod  = datos.get('fecha_produccion','')
@@ -1010,7 +1030,8 @@ def _gen_malasia_maritimo(xml, datos):
         productos=datos.get('productos', []),
         total_cajas=datos.get('total_cajas',''), total_neto=datos.get('total_neto',''), total_bruto=datos.get('total_bruto',''),
         pallets=datos.get('pallets','1'), kg_pallets=datos.get('kg_pallets',''),
-        neto_celda=6, bruto_celda=7
+        neto_celda=6, bruto_celda=7,
+        total_replacer=lambda fila, tc, tn, tb: _reemplazar_total_celdas(fila, tc, tn, tb, cajas_celda=0, neto_celda=2, bruto_celda=3)
     )
     f_faena = datos.get('fecha_faena','')
     f_prod  = datos.get('fecha_produccion','')
@@ -1045,7 +1066,8 @@ def _gen_singapur_aereo(xml, datos):
         productos=datos.get('productos', []),
         total_cajas=datos.get('total_cajas',''), total_neto=datos.get('total_neto',''), total_bruto=datos.get('total_bruto',''),
         pallets=datos.get('pallets','1'), kg_pallets=datos.get('kg_pallets',''),
-        neto_celda=5, bruto_celda=6
+        neto_celda=6, bruto_celda=7,
+        total_replacer=lambda fila, tc, tn, tb: _reemplazar_total_celdas(fila, tc, tn, tb, cajas_celda=0, neto_celda=2, bruto_celda=3)
     )
     # Fechas
     f_faena = datos.get('fecha_faena','')
@@ -1077,7 +1099,8 @@ def _gen_singapur_maritimo(xml, datos):
         productos=datos.get('productos', []),
         total_cajas=datos.get('total_cajas',''), total_neto=datos.get('total_neto',''), total_bruto=datos.get('total_bruto',''),
         pallets=datos.get('pallets','1'), kg_pallets=datos.get('kg_pallets',''),
-        neto_celda=6, bruto_celda=7
+        neto_celda=6, bruto_celda=7,
+        total_replacer=lambda fila, tc, tn, tb: _reemplazar_total_celdas(fila, tc, tn, tb, cajas_celda=0, neto_celda=2, bruto_celda=3)
     )
     # Fechas
     f_faena = datos.get('fecha_faena','')
