@@ -126,11 +126,13 @@ def generar():
             productos_list[restantes_idx[0]]['contramarca'] = restantes_cod[0]
 
         PATRONES_DESTINO = {
-            'malasia':     'alasia',
-            'singapur':    'ingapur',
-            'mexico':      'exico',
-            'usawclass':   'class',
-            'usaorleans':  'orleans',
+            'malasia':          'alasia',
+            'singapur':         'ingapur',
+            'mexico':           'exico',
+            'usawclass':        'class',
+            'usaorleans':       'orleans',
+            'hongkongcongelado': 'congelado',
+            'hongkongenfriado':  'enfriado',
         }
         patron_via = 'aereo' if tipo_via == 'aereo' else 'mar'
         patron_dest = PATRONES_DESTINO.get(destino, PATRONES_DESTINO['malasia'])
@@ -406,6 +408,8 @@ def leer_remito(pdf_bytes):
     m_contra = re.search(r'CONTRAMARCA[:\s]+([^\n\r]+)', texto, re.IGNORECASE)
     contra = m_contra.group(1).strip() if m_contra else ''
     datos['contramarca'] = contra if contra else None
+    m_marca = re.search(r'(?<!CONTRA)MARCA[:\s]+([^\n\r]+)', texto, re.IGNORECASE)
+    datos['marca'] = m_marca.group(1).strip() if m_marca else None
     m_pallets = re.search(r'EN\s+(\d+)\s+PALLETS?', texto, re.IGNORECASE)
     datos['pallets'] = m_pallets.group(1) if m_pallets else None
     m_tot_cajas = re.search(r'Total General\s+(\d[\d\.]*)', texto)
@@ -639,6 +643,56 @@ def armar_nombre_mexico(prod):
     return es_generico
 
 
+# ── NOMBRES ESPECIFICOS HONG KONG (corte / ingles, con prefijo BEEF/FROZEN BEEF) ──
+# A diferencia de Malasia/Singapur, Hong Kong pide el nombre en ingles con el
+# prefijo "BEEF " (y "FROZEN BEEF " si el envio es congelado). Ademas hay
+# cortes con el mismo nombre corto en el remito que son en realidad productos
+# distintos (ej. "BIFE ANCHO CON HUESO" vs "BIFE ANCHO CON COSTILLA TOMAHAWK"),
+# por eso se buscan las claves mas especificas primero.
+MAPA_HONGKONG = {
+    'BIFE ANCHO CON COSTILLA TOMAHAWK': {'es': 'BIFE ANCHO CON HUESO',    'en': 'TOMAHAWK'},
+    'BIFE ANCHO CON HUESO':             {'es': 'BIFE ANCHO CON HUESO',    'en': 'OP RIBS'},
+    'BIFE ANCHO S/T CC':                {'es': 'BIFE ANCHO SIN TAPA CC', 'en': 'RIBEYE LIP ON'},
+    'BIFE ANCHO SIN TAPA CC':           {'es': 'BIFE ANCHO SIN TAPA CC', 'en': 'RIBEYE LIP ON'},
+    'BIFE ANCHO ST':                    {'es': 'BIFE ANCHO SIN TAPA',    'en': 'RIBEYE'},
+    'BIFE ANCHO SIN TAPA':              {'es': 'BIFE ANCHO SIN TAPA',    'en': 'RIBEYE'},
+    'BIFE ANGOSTO':                     {'es': 'BIFE ANGOSTO',           'en': 'STRIPLOIN'},
+    'AGUJA':                            {'es': 'AGUJA',                  'en': 'CHUCK ROLL'},
+    'CENTRO DE ENTRAÑA':                {'es': 'CENTRO DE ENTRAÑA',      'en': 'THICK SKIRT'},
+    'ENTRAÑA FINA':                     {'es': 'ENTRAÑA FINA',           'en': 'THIN SKIRT'},
+    'ENTRAÑA':                          {'es': 'CENTRO DE ENTRAÑA',      'en': 'THICK SKIRT'},  # sin calificativo = CENTRO DE ENTRAÑA (confirmado con CA218000)
+    'CORAZON DE LENGUA':                {'es': 'CORAZON DE LENGUA',      'en': 'PEELED CENTRE CUT TONGUE'},
+    'MOLLEJA':                          {'es': 'MOLLEJA',                'en': 'SWEETBREAD'},
+    'HUESO DE PIERNA EN TROZOS':        {'es': 'HUESO DE PIERNA EN TROZOS', 'en': 'CENTRE CUT MARROW BONE'},
+    'NUEZ DE QUIJADA':                  {'es': 'NUEZ DE QUIJADA',        'en': 'CHEEK MEAT'},
+}
+CLAVES_HONGKONG = sorted(MAPA_HONGKONG.keys(), key=len, reverse=True)
+
+
+def buscar_info_hongkong(desc_original):
+    d = (desc_original or '').upper()
+    for clave in CLAVES_HONGKONG:
+        if clave in d:
+            return MAPA_HONGKONG[clave]
+    return None
+
+
+def armar_nombre_hongkong(prod, es_congelado):
+    """Arma el nombre 'ES/ (FROZEN )BEEF EN' de una sola linea para Hong Kong.
+    Si el corte no esta en MAPA_HONGKONG, usa la descripcion completa del
+    remito como respaldo (igual que Mexico) en vez de quedar en blanco."""
+    info = buscar_info_hongkong(prod.get('desc_original', ''))
+    prefijo = 'FROZEN BEEF ' if es_congelado else 'BEEF '
+    if info is not None:
+        return info['es'] + '/ ' + prefijo + info['en']
+
+    es_generico = limpiar_desc_mexico(prod.get('desc_original', '')) or (prod.get('nombre_es', '') or '').strip().upper()
+    en_generico = (buscar_nombre_en(es_generico) or '').strip().upper()
+    if en_generico:
+        return es_generico + '/ ' + prefijo + en_generico
+    return es_generico
+
+
 # ── XML HELPERS ──────────────────────────────────────────────────────────────
 
 def get_trs(xml):
@@ -795,6 +849,14 @@ def fmt_fecha_al_to(f):
     return f or ''
 
 
+def fmt_fecha_to_hongkong(f):
+    """'dd/mm/yyyy al dd/mm/yyyy' -> 'dd/mm/yyyy to dd/mm/yyyy' (I.11 de Hong Kong, 'to' en minuscula sin 'AL')."""
+    if f and ' al ' in f.lower():
+        partes = re.split(r'\s+al\s+', f, flags=re.IGNORECASE)
+        return partes[0].strip() + ' to ' + partes[1].strip()
+    return f or ''
+
+
 def fmt_fecha_al(f):
     if f and ' al ' in f.lower():
         partes = re.split(r'\s+al\s+', f, flags=re.IGNORECASE)
@@ -887,6 +949,10 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
         xml, al = _gen_usa_wclass(xml, datos)
     elif destino == 'usaorleans':
         xml, al = _gen_usa_orleans(xml, datos)
+    elif destino == 'hongkongcongelado':
+        xml, al = _gen_hongkong(xml, datos, es_congelado=True, tipo_via=tipo_via)
+    elif destino == 'hongkongenfriado':
+        xml, al = _gen_hongkong(xml, datos, es_congelado=False, tipo_via=tipo_via)
     else:
         if tipo_via == 'aereo':
             xml, al = _gen_malasia_aereo(xml, datos)
@@ -1434,6 +1500,79 @@ def _gen_usa_orleans(xml, datos):
     # Fecha de emision (aparece 2 veces: certificacion pag.2 y firma del anexo pag.3)
     fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
     xml = xml.replace('21/07/2026', fecha_emi)
+
+    return xml, alertas
+
+
+# ── HONG KONG (4 variantes: congelado/enfriado x aereo/maritimo) ────────────
+# Una sola linea por producto (no ES/EN separadas), sin columna de bruto
+# (solo peso neto), fecha de produccion como rango unico por envio (no por
+# producto), y el checkbox de temperatura ya viene fijo en la plantilla
+# correcta (hay un archivo por combinacion, no se mueve dinamicamente).
+
+def _gen_hongkong(xml, datos, es_congelado, tipo_via):
+    alertas = []
+    trs = get_trs(xml)
+
+    _, _, _, header_idx = _get_fila_por_contenido(xml, trs, 'packages')
+    primera_idx = (header_idx + 1) if header_idx is not None else 6
+
+    _, _, _, total_idx = _get_fila_por_contenido(xml, trs, 'Totales / Total')
+    if total_idx is None:
+        total_idx = primera_idx + 6
+
+    fila_modelo, ini_mod, _ = get_fila_xml(xml, trs, primera_idx)
+    fila_total, ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx)
+
+    f_prod_fmt = fmt_fecha_al_to(datos.get('fecha_produccion', '') or '')
+    marca = datos.get('marca', '') or ''
+    if not marca:
+        alertas.append('Marca no encontrada en el remito - completar manualmente')
+
+    nuevas_filas = ''
+    for prod in datos.get('productos', []):
+        nombre_bi = armar_nombre_hongkong(prod, es_congelado)
+        nueva = fila_modelo
+        nueva = _reemplazar_celda(nueva, 0, str(prod.get('cajas', '')))
+        nueva = _reemplazar_celda(nueva, 1, nombre_bi)
+        nueva = _reemplazar_celda(nueva, 2, f_prod_fmt)
+        nueva = _reemplazar_celda(nueva, 3, marca)
+        nueva = _reemplazar_celda(nueva, 5, str(prod.get('neto', '')))
+        nuevas_filas += nueva
+
+    nueva_total = fila_total
+    nueva_total = _reemplazar_celda(nueva_total, 0, str(datos.get('total_cajas', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 2, str(datos.get('total_neto', '')))
+
+    xml = xml[:ini_mod] + nuevas_filas + nueva_total + xml[fin_tot:]
+
+    # Transporte - Aereo (vuelo + AWB) o Maritimo (buque + referencia BL), segun cual exista en esta plantilla
+    if tipo_via == 'aereo':
+        vuelo = datos.get('transporte', '') or ''
+        if vuelo: xml = xml.replace('LH511', vuelo)
+        awb = datos.get('awb', '') or datos.get('pedido_referencia', '') or ''
+        if awb: xml = re.sub(r'AWB:\s*020-05990725', 'AWB:  ' + awb, xml)
+    else:
+        buque = datos.get('transporte', '') or ''
+        if buque: xml = xml.replace('SAN LORENZO MAERSK', buque)
+        contenedor = datos.get('contenedor', '') or ''
+        if contenedor: xml = xml.replace('MNBU386303-5', contenedor)
+        precinto = datos.get('precinto_afip') or datos.get('precinto_senasa') or ''
+        if precinto: xml = xml.replace('BAH74888', precinto)
+
+    # Fecha limite de conservacion (I.11)
+    f_venc_fmt = fmt_fecha_to_hongkong(datos.get('fecha_vencimiento', '') or '')
+    if f_venc_fmt:
+        xml = re.sub(r'\d{2}/\d{2}/\d{4}\s+to\s+\d{2}/\d{2}/\d{4}', f_venc_fmt, xml, count=1)
+
+    # Fecha de emision (pie del certificado) - siempre es la ultima fecha
+    # dd/mm/yyyy del documento, posicionalmente (evita hardcodear el valor de
+    # ejemplo de una plantilla puntual, que difiere entre congelado/enfriado).
+    fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
+    todas_fechas = list(re.finditer(r'\d{2}/\d{2}/\d{4}', xml))
+    if todas_fechas:
+        ultima = todas_fechas[-1]
+        xml = xml[:ultima.start()] + fecha_emi + xml[ultima.end():]
 
     return xml, alertas
 
