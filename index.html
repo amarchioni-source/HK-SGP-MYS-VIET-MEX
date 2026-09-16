@@ -189,6 +189,7 @@
         <option value="usaallenatural_maritimo">🇺🇸 USA — Alle Processing (Natural)</option>
         <option value="filipinas_aereo">🇵🇭 Filipinas — Aéreo</option>
         <option value="filipinas_maritimo">🇵🇭 Filipinas — Marítimo</option>
+        <option value="ecuador_maritimo">🇪🇨 Ecuador — Marítimo</option>
       </select>
     </div>
 
@@ -215,6 +216,20 @@
         <div class="icon">📄</div>
         <div class="label"><strong>Clic para elegir</strong> o arrastrar aquí</div>
         <div class="filename" id="nombre-sanitario"></div>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>
+        Sanitario Provisorio 2 (opcional)
+        <span class="badge badge-pdf">PDF</span>
+      </label>
+      <span class="hint">Solo si el destino separa carne y menudencias en 2 certificados (ej. Ecuador) - se suman los pallets/kg de ambos</span>
+      <div class="file-drop">
+        <input type="file" name="sanitario2" accept=".pdf" onchange="mostrarNombre(this,'nombre-sanitario2')"/>
+        <div class="icon">📄</div>
+        <div class="label"><strong>Clic para elegir</strong> o arrastrar aquí</div>
+        <div class="filename" id="nombre-sanitario2"></div>
       </div>
     </div>
 
