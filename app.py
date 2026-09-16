@@ -1060,7 +1060,10 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
     elif destino in ('usaallecondimentada', 'usaallenatural'):
         xml, al = _gen_alle_processing(xml, datos)
     elif destino == 'filipinas':
-        xml, al = _gen_filipinas(xml, datos, tipo_via)
+        if tipo_via == 'aereo':
+            xml, al = _gen_filipinas_aereo(xml, datos)
+        else:
+            xml, al = _gen_filipinas_maritimo(xml, datos)
     else:
         if tipo_via == 'aereo':
             xml, al = _gen_malasia_aereo(xml, datos)
@@ -1836,7 +1839,93 @@ def _gen_alle_processing(xml, datos):
 # checkbox de temperatura se mueve dinamicamente (un solo archivo cubre
 # enfriado y congelado), igual que Malasia/Singapur.
 
-def _gen_filipinas(xml, datos, tipo_via):
+def _gen_filipinas_aereo(xml, datos):
+    """Filipinas AEREO - funcion completamente independiente de la de maritimo
+    (plantilla propia, con su propia fila de pallets y sus propios valores de
+    ejemplo para transporte/contenedor/precinto)."""
+    alertas = []
+    trs = get_trs(xml)
+
+    _, _, _, header_idx = _get_fila_por_contenido(xml, trs, 'Number of packages')
+    primera_idx = (header_idx + 1) if header_idx is not None else 5
+
+    fila_pal, ini_pal, fin_pal, idx_pal = _get_fila_por_contenido(xml, trs, 'ACONDICIONAD')
+
+    _, _, _, total_idx = _get_fila_por_contenido(xml, trs, 'Total / es')
+    if total_idx is None:
+        total_idx = primera_idx + 6
+
+    fila_modelo, ini_mod, _ = get_fila_xml(xml, trs, primera_idx)
+    fila_total, ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx)
+
+    es_congelado = datos.get('es_congelado', False)
+
+    nuevas_filas = ''
+    for prod in datos.get('productos', []):
+        nombre_bi = armar_nombre_filipinas(prod, es_congelado)
+        nueva = fila_modelo
+        nueva = _reemplazar_celda(nueva, 0, str(prod.get('cajas', '')))
+        nueva = _reemplazar_celda(nueva, 1, nombre_bi)
+        nueva = _reemplazar_celda(nueva, 6, formatear_miles_en(prod.get('neto', '')))
+        nueva = _reemplazar_celda(nueva, 7, formatear_miles_en(prod.get('bruto', '')))
+        nuevas_filas += nueva
+
+    # Filipinas Aereo SIEMPRE tiene la fila de pallets, y su peso SIEMPRE se
+    # suma al bruto total (asi es esta plantilla especificamente)
+    pallets = datos.get('pallets', '') or ''
+    kg_pallets = datos.get('kg_pallets', '') or ''
+    nueva_pal = _reemplazar_pallets_en_fila(fila_pal, pallets, kg_pallets) if (fila_pal and pallets) else (fila_pal or '')
+
+    total_bruto = datos.get('total_bruto', '')
+    if kg_pallets:
+        try:
+            total_bruto = '{:.2f}'.format(float(total_bruto) + float(kg_pallets))
+        except (TypeError, ValueError):
+            pass
+
+    nueva_total = fila_total
+    nueva_total = _reemplazar_celda(nueva_total, 0, str(datos.get('total_cajas', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 2, formatear_miles_en(datos.get('total_neto', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 3, formatear_miles_en(total_bruto))
+
+    xml = xml[:ini_mod] + nuevas_filas + nueva_pal + nueva_total + xml[fin_tot:]
+
+    # Fechas de faena / produccion / vencimiento (rango unico por envio)
+    trs2 = get_trs(xml)
+    xml = _reemplazar_fechas(xml, trs2, datos.get('fecha_faena', ''), datos.get('fecha_produccion', ''),
+                              datos.get('fecha_vencimiento', ''), fmt_fecha_al_to)
+
+    # Temperatura - un solo archivo cubre enfriado y congelado, se mueve la X
+    xml = _set_temperatura_singapur(xml, es_congelado, tipo_via='aereo')
+
+    # Transporte (vuelo) - propio de esta plantilla
+    transporte = datos.get('transporte', '') or ''
+    if transporte: xml = xml.replace('EK248', transporte)
+
+    # Contenedor - esta plantilla lo deja en guiones por defecto (tipico de aereo, sin contenedor)
+    contenedor = datos.get('contenedor', '') or ''
+    if contenedor:
+        xml = _reemplazar_tras_label(xml, r'Container\(s\) number:', contenedor)
+
+    # Precinto - idem, en guiones por defecto
+    precinto = datos.get('precinto_afip') or datos.get('precinto_senasa') or ''
+    if precinto:
+        xml = _reemplazar_tras_label(xml, r'Seal number:', precinto)
+
+    # Fecha de emision (pie del certificado) - la ultima fecha dd/mm/yyyy del documento
+    fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
+    todas_fechas = list(re.finditer(r'\d{2}/\d{2}/\d{4}', xml))
+    if todas_fechas:
+        ultima = todas_fechas[-1]
+        xml = xml[:ultima.start()] + fecha_emi + xml[ultima.end():]
+
+    return xml, alertas
+
+
+def _gen_filipinas_maritimo(xml, datos):
+    """Filipinas MARITIMO - funcion completamente independiente de la de
+    aereo (esta plantilla no tiene fila de pallets separada; el bruto del
+    remito ya viene completo tal cual, sin sumarle nada)."""
     alertas = []
     trs = get_trs(xml)
 
@@ -1875,19 +1964,18 @@ def _gen_filipinas(xml, datos, tipo_via):
                               datos.get('fecha_vencimiento', ''), fmt_fecha_al_to)
 
     # Temperatura - un solo archivo cubre enfriado y congelado, se mueve la X
-    es_congelado = datos.get('es_congelado', False)
-    xml = _set_temperatura_singapur(xml, es_congelado, tipo_via=tipo_via)
+    xml = _set_temperatura_singapur(xml, es_congelado, tipo_via='maritimo')
 
-    # Transporte (buque/aerolinea)
+    # Transporte (buque) - propio de esta plantilla
     transporte = datos.get('transporte', '') or ''
     if transporte: xml = xml.replace('ZIM USA', transporte)
 
-    # Contenedor
+    # Contenedor - propio de esta plantilla
     contenedor = datos.get('contenedor', '') or ''
     if contenedor: xml = xml.replace('MNBU4390003', contenedor)
     if not contenedor: alertas.append('Contenedor no encontrado - completar manualmente')
 
-    # Precinto (un solo campo)
+    # Precinto - propio de esta plantilla
     precinto = datos.get('precinto_afip') or datos.get('precinto_senasa') or ''
     if precinto: xml = xml.replace('BAH74877', precinto)
     if not precinto: alertas.append('Precinto no encontrado - completar manualmente')
