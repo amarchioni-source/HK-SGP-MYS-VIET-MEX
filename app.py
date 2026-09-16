@@ -158,6 +158,7 @@ def generar():
             'hongkongenfriado':  'enfriado',
             'filipinas':         'filipinas',
             'ecuador':           'ecuador',
+            'egipto':            'egipto',
             'usaallecondimentada': 'condimentada',
             'usaallenatural':      'natural',
         }
@@ -799,6 +800,32 @@ def fusionar_productos_ecuador(productos):
     return fusionados
 
 
+# ── NOMBRES ESPECIFICOS EGIPTO (nombre bilingue de una sola linea) ──────────
+MAPA_EGIPTO = {
+    'HIGADO': 'HIGADOS BOVINOS CONGELADOS / FROZEN BEEF OFFALS LIVERS',
+    'RIÑON':  'RIÑONES BOVINOS CONGELADOS / FROZEN BEEF OFFALS KIDNEYS',
+}
+CLAVES_EGIPTO = sorted(MAPA_EGIPTO.keys(), key=len, reverse=True)
+
+
+def armar_nombre_egipto(prod):
+    """Arma el nombre bilingue de una sola linea 'ES / EN' para Egipto. Si el
+    corte no esta todavia en MAPA_EGIPTO, cae a la descripcion completa del
+    remito + la tabla general de traducciones en vez de dejar la celda
+    vacia o con un nombre generico de una sola palabra."""
+    desc_original = prod.get('desc_original', '')
+    d = (desc_original or '').upper()
+    for clave in CLAVES_EGIPTO:
+        if clave in d:
+            return MAPA_EGIPTO[clave]
+
+    es = (desc_original.split('(')[0].strip().upper() if desc_original else '') or (prod.get('nombre_es', '') or '').strip().upper()
+    en = (buscar_nombre_en(es) or '').strip().upper()
+    if en:
+        return es + ' / ' + en
+    return es
+
+
 def armar_nombre_filipinas(prod, es_congelado):
     """Arma el nombre bilingue de una sola linea 'ES / EN' para Filipinas. Si el
     corte no esta todavia en MAPA_FILIPINAS, cae a la descripcion completa del
@@ -1163,6 +1190,8 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
             xml, al = _gen_filipinas_maritimo(xml, datos)
     elif destino == 'ecuador':
         xml, al = _gen_ecuador(xml, datos)
+    elif destino == 'egipto':
+        xml, al = _gen_egipto(xml, datos)
     else:
         if tipo_via == 'aereo':
             xml, al = _gen_malasia_aereo(xml, datos)
@@ -2157,6 +2186,76 @@ def _gen_ecuador(xml, datos):
     # Precinto (un solo campo)
     precinto = datos.get('precinto_afip') or datos.get('precinto_senasa') or ''
     if precinto: xml = xml.replace('BAH79592', precinto)
+    if not precinto: alertas.append('Precinto no encontrado - completar manualmente')
+
+    # Fecha de emision (pie del certificado) - la ultima fecha dd/mm/yyyy del documento
+    fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
+    todas_fechas = list(re.finditer(r'\d{2}/\d{2}/\d{4}', xml))
+    if todas_fechas:
+        ultima = todas_fechas[-1]
+        xml = xml[:ultima.start()] + fecha_emi + xml[ultima.end():]
+
+    return xml, alertas
+
+
+# ── EGIPTO ────────────────────────────────────────────────────────────────
+# Nombre bilingue de una sola linea (como Malasia/Singapur combinado en un
+# solo renglon). Numeros en formato simple (punto decimal, sin separador de
+# miles). Sin fila de pallets. El total bruto no suma nada extra (viene
+# completo del remito, igual que Mexico/Ecuador).
+
+def _gen_egipto(xml, datos):
+    alertas = []
+    trs = get_trs(xml)
+
+    _, _, _, header_idx = _get_fila_por_contenido(xml, trs, 'Description of goods')
+    primera_idx = (header_idx + 1) if header_idx is not None else 5
+
+    _, _, _, total_idx = _get_fila_por_contenido(xml, trs, 'Total / es')
+    if total_idx is None:
+        total_idx = primera_idx + 4
+
+    fila_modelo, ini_mod, _ = get_fila_xml(xml, trs, primera_idx)
+    fila_total, ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx)
+
+    nuevas_filas = ''
+    for prod in datos.get('productos', []):
+        nombre_bi = armar_nombre_egipto(prod)
+        nueva = fila_modelo
+        nueva = _reemplazar_celda(nueva, 0, str(prod.get('cajas', '')))
+        nueva = _reemplazar_celda(nueva, 1, nombre_bi)
+        nueva = _reemplazar_celda(nueva, 6, prod.get('neto', ''))
+        nueva = _reemplazar_celda(nueva, 7, prod.get('bruto', ''))
+        nuevas_filas += nueva
+
+    nueva_total = fila_total
+    nueva_total = _reemplazar_celda(nueva_total, 0, str(datos.get('total_cajas', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 2, str(datos.get('total_neto', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 3, str(datos.get('total_bruto', '')))
+
+    xml = xml[:ini_mod] + nuevas_filas + nueva_total + xml[fin_tot:]
+
+    # Fechas de faena / produccion / vencimiento (rango unico por envio)
+    trs2 = get_trs(xml)
+    xml = _reemplazar_fechas(xml, trs2, datos.get('fecha_faena', ''), datos.get('fecha_produccion', ''),
+                              datos.get('fecha_vencimiento', ''), fmt_fecha_al)
+
+    # Temperatura - un solo archivo cubre enfriado y congelado, se mueve la X
+    es_congelado = datos.get('es_congelado', False)
+    xml = _set_temperatura_singapur(xml, es_congelado, tipo_via='maritimo')
+
+    # Transporte (buque)
+    transporte = datos.get('transporte', '') or ''
+    if transporte: xml = xml.replace('MAERSK LONDRINA', transporte)
+
+    # Contenedor
+    contenedor = datos.get('contenedor', '') or ''
+    if contenedor: xml = xml.replace('SUDU624811-7', contenedor)
+    if not contenedor: alertas.append('Contenedor no encontrado - completar manualmente')
+
+    # Precinto (un solo campo)
+    precinto = datos.get('precinto_afip') or datos.get('precinto_senasa') or ''
+    if precinto: xml = xml.replace('BAH74974', precinto)
     if not precinto: alertas.append('Precinto no encontrado - completar manualmente')
 
     # Fecha de emision (pie del certificado) - la ultima fecha dd/mm/yyyy del documento
