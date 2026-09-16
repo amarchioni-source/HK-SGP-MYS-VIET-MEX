@@ -133,6 +133,8 @@ def generar():
             'usaorleans':       'orleans',
             'hongkongcongelado': 'congelado',
             'hongkongenfriado':  'enfriado',
+            'usaallecondimentada': 'condimentada',
+            'usaallenatural':      'natural',
         }
         patron_via = 'aereo' if tipo_via == 'aereo' else 'mar'
         patron_dest = PATRONES_DESTINO.get(destino, PATRONES_DESTINO['malasia'])
@@ -953,6 +955,8 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
         xml, al = _gen_hongkong(xml, datos, es_congelado=True, tipo_via=tipo_via)
     elif destino == 'hongkongenfriado':
         xml, al = _gen_hongkong(xml, datos, es_congelado=False, tipo_via=tipo_via)
+    elif destino in ('usaallecondimentada', 'usaallenatural'):
+        xml, al = _gen_alle_processing(xml, datos)
     else:
         if tipo_via == 'aereo':
             xml, al = _gen_malasia_aereo(xml, datos)
@@ -1573,6 +1577,94 @@ def _gen_hongkong(xml, datos, es_congelado, tipo_via):
     if todas_fechas:
         ultima = todas_fechas[-1]
         xml = xml[:ultima.start()] + fecha_emi + xml[ultima.end():]
+
+    return xml, alertas
+
+
+# ── USA ALLE PROCESSING CORP (condimentada / natural) ────────────────────────
+# Igual estructura que Wclass (un solo total, sin desglose producto por
+# producto), pero es maritimo (no aereo), SI completa fecha de faena, y el
+# precinto es un solo campo (no combinado AFIP/SENASA). Las 2 variantes
+# (con/sin condimentar) son la MISMA logica - la diferencia es pura descripcion
+# fija ya horneada en cada plantilla, elegida por el destino seleccionado.
+
+def _gen_alle_processing(xml, datos):
+    alertas = []
+
+    total_cajas = str(datos.get('total_cajas', '') or '')
+    contramarca = datos.get('contramarca', '') or ''
+    if not contramarca:
+        alertas.append('Contramarca no encontrada en el remito - completar manualmente')
+
+    f_faena = datos.get('fecha_faena', '') or ''
+    f_prod  = datos.get('fecha_produccion', '') or ''
+    f_venc  = datos.get('fecha_vencimiento', '') or ''
+    if not f_faena: alertas.append('Fecha de faena no encontrada - completar manualmente')
+    if not f_prod:  alertas.append('Fecha de producción no encontrada en el piqueo - completar manualmente')
+    if not f_venc:  alertas.append('Fecha límite de conservación no encontrada - completar manualmente')
+
+    peso_neto_kg  = str(datos.get('total_neto', '') or '')
+    peso_neto_lbs = kg_a_lbs(peso_neto_kg)
+
+    f_faena_fmt = fmt_fecha_al_to_usa(f_faena)
+    f_prod_fmt  = fmt_fecha_al_to_usa(f_prod)
+    lote_fmt    = fecha_a_lote_usa(f_prod)
+    f_venc_fmt  = fmt_fecha_al_to_usa(f_venc)
+    fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
+
+    # Bultos - aparece 2 veces (fila ES, fila EN, mas la fila de Totales)
+    if total_cajas:
+        # Reemplazo por valor de ejemplo conocido de la plantilla (220 / 1076 segun variante)
+        for viejo in ['>220<', '>1076<']:
+            if viejo in xml:
+                xml = xml.replace(viejo, '>' + total_cajas + '<')
+
+    # Fecha de faena, fecha de produccion y contramarca - aparecen 2 veces (fila ES y fila EN)
+    if f_faena_fmt:
+        xml = xml.replace('31/08/2026 al/to 07/09/2026', f_faena_fmt)
+    if f_prod_fmt:
+        xml = xml.replace('01/09/2026 al/to 09/09/2026', f_prod_fmt)
+        xml = xml.replace('04/09/2026 al/to 09/09/2026', f_prod_fmt)
+    if contramarca:
+        xml = xml.replace('C289', contramarca)
+        xml = xml.replace('C290', contramarca)
+    if lote_fmt:
+        xml = xml.replace('20260901 al/to 20260909', lote_fmt)
+        xml = xml.replace('20260904 al/to 20260909', lote_fmt)
+
+    # Peso neto en KGS y en LBS (fila ES/EN por separado, y el total en una celda
+    # combinada - a veces el numero y la unidad quedan en runs separados por
+    # tener distinto color, por eso el regex tolera tags XML de por medio)
+    if peso_neto_kg:
+        kg_fmt = peso_neto_kg.replace('.', ',')
+        for viejo_kg in ['3813,00', '21263,00']:
+            xml = re.sub(re.escape(viejo_kg) + r'((?:\s|<[^>]+>)*?)KGS', kg_fmt + r'\1KGS', xml)
+    if peso_neto_lbs:
+        lbs_fmt = peso_neto_lbs.replace('.', ',')
+        for viejo_lbs in ['8406,22', '46876,84']:
+            xml = re.sub(re.escape(viejo_lbs) + r'((?:\s|<[^>]+>)*?)LBS', lbs_fmt + r'\1LBS', xml)
+
+    # Transporte (buque - es maritimo)
+    transporte = datos.get('transporte', '') or ''
+    if transporte: xml = xml.replace('STEPHANIE C', transporte)
+
+    # Contenedor
+    contenedor = datos.get('contenedor', '') or ''
+    if contenedor: xml = xml.replace('MMAU1250441', contenedor)
+    if not contenedor: alertas.append('Contenedor no encontrado - completar manualmente')
+
+    # Precinto (un solo campo en esta plantilla)
+    precinto = datos.get('precinto_afip') or datos.get('precinto_senasa') or ''
+    if precinto: xml = xml.replace('BAH74945', precinto)
+    if not precinto: alertas.append('Precinto no encontrado - completar manualmente')
+
+    # Fecha limite de conservacion (I.15)
+    if f_venc_fmt:
+        xml = xml.replace('31/08/2028 al/to 07/09/2028', f_venc_fmt)
+
+    # Fecha de emision (pie del certificado) - esta plantilla la deja vacia por
+    # defecto (no trae un valor de ejemplo), hay que insertarla.
+    xml = xml.replace('Date:   </w:t>', 'Date:   ' + fecha_emi + '</w:t>', 1)
 
     return xml, alertas
 
