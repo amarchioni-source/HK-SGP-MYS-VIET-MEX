@@ -27,13 +27,14 @@ def index():
 @app.route('/generar', methods=['POST'])
 def generar():
     try:
-        piqueo_f    = request.files.get('piqueo')
-        reporte_f   = request.files.get('reporte')
-        sanitario_f = request.files.get('sanitario')
-        remito_f    = request.files.get('remito')
-        shipment    = request.form.get('shipment_no', '').strip()
-        tipo_via    = request.form.get('tipo_via', '').strip()
-        destino     = request.form.get('destino', 'malasia').strip()
+        piqueo_f     = request.files.get('piqueo')
+        reporte_f    = request.files.get('reporte')
+        sanitario_f  = request.files.get('sanitario')
+        sanitario2_f = request.files.get('sanitario2')  # opcional - algunos destinos (ej. Ecuador) reparten carne/menudencias en 2 certificados separados que van juntos en un solo sanitario final
+        remito_f     = request.files.get('remito')
+        shipment     = request.form.get('shipment_no', '').strip()
+        tipo_via     = request.form.get('tipo_via', '').strip()
+        destino      = request.form.get('destino', 'malasia').strip()
 
         errores = []
         if not piqueo_f:    errores.append('Falta el Piqueo (.xlsx)')
@@ -50,11 +51,33 @@ def generar():
         datos_remito = leer_remito(remito_f.read())
         datos_prov   = leer_sanitario_provisorio(sanitario_f.read())
 
+        if sanitario2_f:
+            # Se subieron 2 provisorios (ej. Ecuador: uno de carne y otro de
+            # menudencias) - se combinan sumando pallets y kg, porque el
+            # certificado final los declara juntos.
+            datos_prov2 = leer_sanitario_provisorio(sanitario2_f.read())
+            try:
+                p1 = int(datos_prov.get('pallets_prov') or 0)
+                p2 = int(datos_prov2.get('pallets_prov') or 0)
+                datos_prov['pallets_prov'] = str(p1 + p2)
+            except (TypeError, ValueError):
+                pass
+            try:
+                k1 = float(datos_prov.get('kg_pallets') or 0)
+                k2 = float(datos_prov2.get('kg_pallets') or 0)
+                datos_prov['kg_pallets'] = '{:.2f}'.format(k1 + k2)
+            except (TypeError, ValueError):
+                pass
+            if datos_prov2.get('es_congelado'):
+                datos_prov['es_congelado'] = True
+
         datos = {**datos_remito, **datos_piqueo, **datos_prov}
         datos['destino'] = destino
-        # Pallets: provisorio tiene prioridad, piqueo como fallback
+        # Pallets: el conteo declarado en el provisorio es mas confiable que el
+        # del piqueo (que cuenta pallets de trabajo, no el conteo final del
+        # embarque) - se usa como respaldo solo si el remito no lo trae.
         if not datos.get('pallets'):
-            datos['pallets'] = datos_piqueo.get('pallets_piqueo')
+            datos['pallets'] = datos_prov.get('pallets_prov') or datos_piqueo.get('pallets_piqueo')
         # Congelado: remito tiene prioridad sobre provisorio
         if datos_remito.get('es_congelado') is not None:
             datos['es_congelado'] = datos_remito['es_congelado']
@@ -134,6 +157,7 @@ def generar():
             'hongkongcongelado': 'congelado',
             'hongkongenfriado':  'enfriado',
             'filipinas':         'filipinas',
+            'ecuador':           'ecuador',
             'usaallecondimentada': 'condimentada',
             'usaallenatural':      'natural',
         }
@@ -710,6 +734,71 @@ def buscar_info_filipinas(desc_original, es_congelado):
     return None
 
 
+# ── NOMBRES Y FUSION DE FILAS ECUADOR ────────────────────────────────────────
+# Ecuador pide un nombre en UNA sola columna (sin bilingue) y ademas fusiona en
+# una sola fila los productos que son el mismo corte pero difieren solo en un
+# RANGO DE PESO (ej. "TAPA DE CUADRIL -1,6 KG" y "+1,6 KG" -> una fila con la
+# suma de cajas/neto/bruto). Los que difieren en grado de calidad (AA) o son
+# "en trozos" (e/tzos) NO se fusionan, aunque el nombre final se vea igual.
+
+def clave_fusion_ecuador(desc_original):
+    """Clave para agrupar filas que se fusionan: la descripcion cruda del
+    remito sin el rango de peso (ej. '-1,6 KG'), pero conservando todo lo
+    demas (grado de calidad, "en trozos", etc.) para no fusionar productos
+    que en realidad son distintos."""
+    d = (desc_original or '').upper()
+    d = re.sub(r'[+\-]\s*\d+[,.]\d+\s*KG', '', d)
+    return re.sub(r'\s+', ' ', d).strip()
+
+
+def limpiar_nombre_ecuador(desc_original):
+    """Nombre simplificado en español para el certificado de Ecuador (sin
+    bilingue). Quita el destino '(EC)' y los codigos de calidad, el rango de
+    peso (ej. '-1,6 KG'), y los calificadores que Ecuador no usa en el nombre
+    final (FINA/ST/CC/PE), conservando "EN TROZOS" si corresponde."""
+    d = (desc_original or '').upper()
+    d = re.sub(r'\s*E/TZOS\s*\(\d+\)', ' EN TROZOS', d)
+    d = re.sub(r'\s*[+\-]\s*\d+[,.]\d+\s*KG', '', d)
+    d = d.split('(')[0].strip()
+    en_trozos = d.endswith('EN TROZOS')
+    base = d[:-len('EN TROZOS')].strip() if en_trozos else d
+    base = re.sub(r'\s+(FINA|ST|CC|PE)$', '', base).strip()
+    return (base + ' EN TROZOS') if en_trozos else base
+
+
+def fusionar_productos_ecuador(productos):
+    """Agrupa los productos del remito por clave_fusion_ecuador, sumando
+    cajas/neto/bruto de los que comparten clave (mismo corte, solo distinto
+    rango de peso). Mantiene el orden de primera aparicion."""
+    grupos = {}
+    orden = []
+    for prod in productos:
+        clave = clave_fusion_ecuador(prod.get('desc_original', ''))
+        if clave not in grupos:
+            grupos[clave] = {
+                'desc_original': prod.get('desc_original', ''),
+                'cajas': 0.0, 'neto': 0.0, 'bruto': 0.0,
+            }
+            orden.append(clave)
+        g = grupos[clave]
+        try: g['cajas'] += float(prod.get('cajas', 0) or 0)
+        except (TypeError, ValueError): pass
+        try: g['neto'] += float(prod.get('neto', 0) or 0)
+        except (TypeError, ValueError): pass
+        try: g['bruto'] += float(prod.get('bruto', 0) or 0)
+        except (TypeError, ValueError): pass
+    fusionados = []
+    for clave in orden:
+        g = grupos[clave]
+        fusionados.append({
+            'desc_original': g['desc_original'],
+            'cajas': str(int(g['cajas'])) if float(g['cajas']).is_integer() else str(g['cajas']),
+            'neto': '{:.2f}'.format(g['neto']),
+            'bruto': '{:.2f}'.format(g['bruto']),
+        })
+    return fusionados
+
+
 def armar_nombre_filipinas(prod, es_congelado):
     """Arma el nombre bilingue de una sola linea 'ES / EN' para Filipinas. Si el
     corte no esta todavia en MAPA_FILIPINAS, cae a la descripcion completa del
@@ -873,7 +962,7 @@ def _reemplazar_pallets_en_fila(fila_xml, pallets, kg_pallets):
 
     if kg_pallets:
         # Caso generico: el numero de KGS esta en el mismo run que el texto "KGS)" (ej. Mexico)
-        nueva_fila, n = re.subn(r'[\d\.]+(\s*KGS\))', str(kg_pallets) + r'\1', fila_xml, count=1)
+        nueva_fila, n = re.subn(r'[\d\.,]+(\s*KGS\))', str(kg_pallets) + r'\1', fila_xml, count=1)
         if n:
             fila_xml = nueva_fila
         else:
@@ -965,6 +1054,14 @@ def fmt_fecha_al(f):
     if f and ' al ' in f.lower():
         partes = re.split(r'\s+al\s+', f, flags=re.IGNORECASE)
         return partes[0] + ' AL ' + partes[1]
+    return f or ''
+
+
+def fmt_fecha_al_minuscula(f):
+    """'dd/mm/yyyy al dd/mm/yyyy' con 'al' en minuscula (formato de Ecuador)."""
+    if f and ' al ' in f.lower():
+        partes = re.split(r'\s+al\s+', f, flags=re.IGNORECASE)
+        return partes[0].strip() + ' al ' + partes[1].strip()
     return f or ''
 
 
@@ -1064,6 +1161,8 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
             xml, al = _gen_filipinas_aereo(xml, datos)
         else:
             xml, al = _gen_filipinas_maritimo(xml, datos)
+    elif destino == 'ecuador':
+        xml, al = _gen_ecuador(xml, datos)
     else:
         if tipo_via == 'aereo':
             xml, al = _gen_malasia_aereo(xml, datos)
@@ -1978,6 +2077,86 @@ def _gen_filipinas_maritimo(xml, datos):
     # Precinto - propio de esta plantilla
     precinto = datos.get('precinto_afip') or datos.get('precinto_senasa') or ''
     if precinto: xml = xml.replace('BAH74877', precinto)
+    if not precinto: alertas.append('Precinto no encontrado - completar manualmente')
+
+    # Fecha de emision (pie del certificado) - la ultima fecha dd/mm/yyyy del documento
+    fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
+    todas_fechas = list(re.finditer(r'\d{2}/\d{2}/\d{4}', xml))
+    if todas_fechas:
+        ultima = todas_fechas[-1]
+        xml = xml[:ultima.start()] + fecha_emi + xml[ultima.end():]
+
+    return xml, alertas
+
+
+# ── ECUADOR ───────────────────────────────────────────────────────────────
+# Nombre en una sola columna en español (sin bilingue). Fusiona filas que son
+# el mismo corte pero difieren solo en rango de peso (ver
+# fusionar_productos_ecuador). Un solo archivo cubre enfriado/congelado (se
+# mueve la X). El total bruto NO suma el peso de pallets (viene completo tal
+# cual del remito, igual que Mexico).
+
+def _gen_ecuador(xml, datos):
+    alertas = []
+    trs = get_trs(xml)
+
+    _, _, _, header_idx = _get_fila_por_contenido(xml, trs, 'Descripción de la mercadería')
+    primera_idx = (header_idx + 1) if header_idx is not None else 5
+
+    fila_pal, ini_pal, fin_pal, idx_pal = _get_fila_por_contenido(xml, trs, 'ACONDICIONADO EN')
+
+    _, _, _, total_idx = _get_fila_por_contenido(xml, trs, 'Total / es')
+    if total_idx is None:
+        total_idx = primera_idx + 10
+
+    fila_modelo, ini_mod, _ = get_fila_xml(xml, trs, primera_idx)
+    fila_total, ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx)
+
+    productos_fusionados = fusionar_productos_ecuador(datos.get('productos', []))
+
+    nuevas_filas = ''
+    for prod in productos_fusionados:
+        nombre = limpiar_nombre_ecuador(prod.get('desc_original', ''))
+        nueva = fila_modelo
+        nueva = _reemplazar_celda(nueva, 0, str(prod.get('cajas', '')))
+        nueva = _reemplazar_celda(nueva, 1, nombre)
+        nueva = _reemplazar_celda(nueva, 6, prod.get('neto', ''))
+        nueva = _reemplazar_celda(nueva, 7, prod.get('bruto', ''))
+        nuevas_filas += nueva
+
+    pallets = datos.get('pallets', '') or ''
+    kg_pallets_raw = datos.get('kg_pallets', '') or ''
+    kg_pallets = kg_pallets_raw.replace('.', ',') if kg_pallets_raw else ''
+    nueva_pal = _reemplazar_pallets_en_fila(fila_pal, pallets, kg_pallets) if (fila_pal and pallets) else (fila_pal or '')
+
+    nueva_total = fila_total
+    nueva_total = _reemplazar_celda(nueva_total, 0, str(datos.get('total_cajas', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 2, formatear_miles_en(datos.get('total_neto', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 3, formatear_miles_en(datos.get('total_bruto', '')))
+
+    xml = xml[:ini_mod] + nuevas_filas + nueva_pal + nueva_total + xml[fin_tot:]
+
+    # Fechas de faena / produccion / vencimiento (rango unico por envio)
+    trs2 = get_trs(xml)
+    xml = _reemplazar_fechas(xml, trs2, datos.get('fecha_faena', ''), datos.get('fecha_produccion', ''),
+                              datos.get('fecha_vencimiento', ''), fmt_fecha_al_minuscula)
+
+    # Temperatura - un solo archivo cubre enfriado y congelado, se mueve la X
+    es_congelado = datos.get('es_congelado', False)
+    xml = _set_temperatura_singapur(xml, es_congelado, tipo_via='maritimo')
+
+    # Transporte (buque)
+    transporte = datos.get('transporte', '') or ''
+    if transporte: xml = xml.replace('SANTA VANESSA', transporte)
+
+    # Contenedor
+    contenedor = datos.get('contenedor', '') or ''
+    if contenedor: xml = xml.replace('UACU479172-0', contenedor)
+    if not contenedor: alertas.append('Contenedor no encontrado - completar manualmente')
+
+    # Precinto (un solo campo)
+    precinto = datos.get('precinto_afip') or datos.get('precinto_senasa') or ''
+    if precinto: xml = xml.replace('BAH79592', precinto)
     if not precinto: alertas.append('Precinto no encontrado - completar manualmente')
 
     # Fecha de emision (pie del certificado) - la ultima fecha dd/mm/yyyy del documento
