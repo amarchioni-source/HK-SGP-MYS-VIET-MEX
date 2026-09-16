@@ -133,6 +133,7 @@ def generar():
             'usaorleans':       'orleans',
             'hongkongcongelado': 'congelado',
             'hongkongenfriado':  'enfriado',
+            'filipinas':         'filipinas',
             'usaallecondimentada': 'condimentada',
             'usaallenatural':      'natural',
         }
@@ -371,6 +372,16 @@ def formatear_miles(valor):
         entero = entero[1:]
     entero_fmt = '{:,}'.format(int(entero)).replace(',', '.')
     return signo + entero_fmt + ',' + dec
+
+
+def formatear_miles_en(valor):
+    """Convierte un numero al formato ingles/EEUU: separador de miles por
+    coma y decimales con punto (ej '24,833.00'), usado en Filipinas."""
+    try:
+        f = float(valor)
+    except (TypeError, ValueError):
+        return valor
+    return '{:,.2f}'.format(f)
 
 
 # ── REMITO (fitz) ────────────────────────────────────────────────────────────
@@ -645,6 +656,86 @@ def armar_nombre_mexico(prod):
     return es_generico
 
 
+# ── NOMBRES ESPECIFICOS FILIPINAS (nombre bilingue de una sola linea) ────────
+# A diferencia de Malasia/Singapur (ES y EN en filas separadas), Filipinas pide
+# el nombre bilingue combinado en UNA sola linea "ES / EN". La tabla se va
+# completando con cada envio nuevo que Angie confirma. IMPORTANTE: el texto
+# congelado y el enfriado de un mismo corte son independientes entre si (no se
+# derivan uno del otro - cada uno viene confirmado por su propio envio real,
+# y pueden diferir en fraseo, orden de palabras, o incluir "ANGUS"/grado de
+# marmoleo segun el lote). Por eso cada corte guarda un dict separado por
+# estado ('congelado'/'enfriado'), completado solo con lo confirmado.
+MAPA_FILIPINAS = {
+    'BIFE ANGOSTO CON HUESO Y LOMO': {
+        'congelado': {'es': 'BIFE ANGOSTO CON HUESO Y LOMO',  'en': 'FROZEN BONE IN BEEF SHORTLOIN'},
+        'enfriado':  {'es': 'BIFE ANGOSTO CON HUESO CON LOMO', 'en': 'CHILLED BEEF ANGUS SHORTLOIN BONE IN GF MB4+'},
+    },
+    'BIFE ANCHO CON HUESO': {
+        'congelado': {'es': 'BIFE ANCHO CON HUESO', 'en': 'FROZEN BONE IN BEEF OP RIBS'},
+        'enfriado':  {'es': 'BIFE ANCHO CON HUESO', 'en': 'CHILLED BEEF ANGUS BONE IN OP RIBS GF AA MB4+'},
+    },
+    'CABEZA DE LOMO': {
+        'congelado': {'es': 'CABEZA DE LOMO', 'en': 'FROZEN BONELESS BEEF TENDERLOIN BUTT GF AA MB2+'},
+        'enfriado':  {'es': 'CABEZA DE LOMO', 'en': 'CHILLED BEEF ANGUS BONELESS TENDERLOIN BUTT GF MB4+'},
+    },
+    # Los siguientes solo estan confirmados para congelado por ahora - se
+    # agrega la variante enfriado cuando Angie confirme un envio con ese corte
+    'CENTRO DE ENTRAÑA':          {'congelado': {'es': 'CENTRO DE ENTRAÑA',          'en': 'FROZEN BEEF HANGING TENDER GF'}},
+    'RABO':                       {'congelado': {'es': 'RABO',                       'en': 'FROZEN BEEF TAILS'}},
+    'LOMO SIN CORDON':            {'congelado': {'es': 'LOMO SIN CORDON',            'en': 'FROZEN BEEF TENDERLOIN GF AA MB2+ AGED'}},
+    'LOMO SC':                    {'congelado': {'es': 'LOMO SIN CORDON',            'en': 'FROZEN BEEF TENDERLOIN GF AA MB2+ AGED'}},
+    'MARUCHA':                    {'congelado': {'es': 'MARUCHA',                    'en': 'FROZEN BONELESS BEEF OYSTER BLADE'}},
+    'GRASA VACUNA DE DESPOSTADA': {'congelado': {'es': 'GRASA VACUNA DE DESPOSTADA', 'en': 'FROZEN BEEF BODY FAT'}},
+    'GRASA VACUNA R':             {'congelado': {'es': 'GRASA VACUNA R',             'en': 'FROZEN BONELESS BEEF FAT'}},
+    'ENTRAÑA FINA':               {'congelado': {'es': 'ENTRAÑA FINA',               'en': 'FROZEN BONELESS BEEF OUTSIDE SKIRT GF'}},
+    'BIFE ANCHO SIN TAPA':        {'congelado': {'es': 'BIFE ANCHO SIN TAPA',        'en': 'FROZEN BEEF BONELESS RIB EYE GF AA MB2+ AGED'}},
+    'TAPA DE CUADRIL':            {'congelado': {'es': 'TAPA DE CUADRIL',            'en': 'FROZEN BEEF BONELESS RUMP CAP GF AA MB2+ AGED'}},
+    'CORAZON DE CUADRIL':         {'congelado': {'es': 'CORAZON DE CUADRIL',         'en': 'FROZEN BONELESS BEEF SIRLOIN CC'}},
+}
+CLAVES_FILIPINAS = sorted(MAPA_FILIPINAS.keys(), key=len, reverse=True)
+
+
+def buscar_info_filipinas(desc_original, es_congelado):
+    d = (desc_original or '').upper()
+    estado = 'congelado' if es_congelado else 'enfriado'
+    for clave in CLAVES_FILIPINAS:
+        if clave in d:
+            variantes = MAPA_FILIPINAS[clave]
+            if estado in variantes:
+                return variantes[estado]
+            # Todavia no se confirmo esta variante puntual (congelado/enfriado) -
+            # mejor usar la que si esta confirmada que dejar el corte sin mapear.
+            for v in variantes.values():
+                return v
+    return None
+
+
+def armar_nombre_filipinas(prod, es_congelado):
+    """Arma el nombre bilingue de una sola linea 'ES / EN' para Filipinas. Si el
+    corte no esta todavia en MAPA_FILIPINAS, cae a la descripcion completa del
+    remito + la tabla general de traducciones (igual que Mexico) en vez de
+    dejar la celda vacia o con un nombre generico de una sola palabra."""
+    desc_original = prod.get('desc_original', '')
+
+    # Caso especial: "ASADO CON HUESO" lleva la cantidad de costillas, que
+    # varia por envio (viene codificada en el remito como ej. "5C")
+    m_costillas = re.search(r'ASADO CON HUESO\s*(\d+)\s*C\b', desc_original, re.IGNORECASE)
+    if m_costillas:
+        n = m_costillas.group(1)
+        prefijo_en = 'FROZEN' if es_congelado else 'CHILLED'
+        return 'ASADO CON HUESO ' + n + ' COSTILLAS / ' + prefijo_en + ' BEEF BONE IN TOP PLATE ' + n + ' RIBS'
+
+    info = buscar_info_filipinas(desc_original, es_congelado)
+    if info is not None:
+        return info['es'] + ' / ' + info['en']
+
+    es = (desc_original.split('(')[0].strip().upper() if desc_original else '') or (prod.get('nombre_es', '') or '').strip().upper()
+    en = (buscar_nombre_en(es) or '').strip().upper()
+    if en:
+        return es + ' / ' + en
+    return es
+
+
 # ── NOMBRES ESPECIFICOS HONG KONG (corte / ingles, con prefijo BEEF/FROZEN BEEF) ──
 # A diferencia de Malasia/Singapur, Hong Kong pide el nombre en ingles con el
 # prefijo "BEEF " (y "FROZEN BEEF " si el envio es congelado). Ademas hay
@@ -705,6 +796,17 @@ def get_fila_xml(xml, trs, idx):
     ini = trs[idx].start()
     fin = trs[idx + 1].start() if idx + 1 < len(trs) else len(xml)
     return xml[ini:fin], ini, fin
+
+
+def _reemplazar_tras_label(xml, patron_label, valor_nuevo, count=1, flags=re.IGNORECASE):
+    """Reemplaza el valor que sigue a un label de texto fijo (ej. 'Contenedor N°) /
+    Container Identification:'), tolerando que haya tags XML y/o runs vacios/con
+    solo espacios de por medio (formato tipico de Word al fragmentar en runs).
+    El valor debe empezar con un caracter alfanumerico - esto es clave para NO
+    conformarse con un run intermedio que solo tiene un espacio, y seguir hasta
+    encontrar el valor real."""
+    patron = re.compile(r'(' + patron_label + r'(?:\s|<[^>]+>)*?)([A-Za-z0-9][^<]*)', flags)
+    return patron.sub(lambda m: m.group(1) + valor_nuevo, xml, count=count)
 
 
 def _reemplazar_celda(xml_fila, celda_idx, nuevo_texto):
@@ -957,6 +1059,8 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
         xml, al = _gen_hongkong(xml, datos, es_congelado=False, tipo_via=tipo_via)
     elif destino in ('usaallecondimentada', 'usaallenatural'):
         xml, al = _gen_alle_processing(xml, datos)
+    elif destino == 'filipinas':
+        xml, al = _gen_filipinas(xml, datos, tipo_via)
     else:
         if tipo_via == 'aereo':
             xml, al = _gen_malasia_aereo(xml, datos)
@@ -1350,14 +1454,16 @@ def _set_temperatura_singapur(xml, es_congelado, tipo_via):
 
 def _gen_usa_wclass(xml, datos):
     alertas = []
+    trs = get_trs(xml)
 
     total_cajas = str(datos.get('total_cajas', '') or '')
     contramarca = datos.get('contramarca', '') or ''
     if not contramarca:
         alertas.append('Contramarca no encontrada en el remito - completar manualmente')
 
-    f_prod = datos.get('fecha_produccion', '') or ''
-    f_venc = datos.get('fecha_vencimiento', '') or ''
+    f_faena = datos.get('fecha_faena', '') or ''
+    f_prod  = datos.get('fecha_produccion', '') or ''
+    f_venc  = datos.get('fecha_vencimiento', '') or ''
     if not f_prod:
         alertas.append('Fecha de producción no encontrada en el piqueo - completar manualmente')
     if not f_venc:
@@ -1366,45 +1472,71 @@ def _gen_usa_wclass(xml, datos):
     peso_neto_kg  = str(datos.get('total_neto', '') or '')
     peso_neto_lbs = kg_a_lbs(peso_neto_kg)
 
+    f_faena_fmt    = fmt_fecha_al_to_usa(f_faena)
     fecha_prod_fmt = fmt_fecha_al_to_usa(f_prod)
     lote_fmt       = fecha_a_lote_usa(f_prod)
     fecha_venc_fmt = fmt_fecha_al_to_usa(f_venc)
     fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
 
-    # Bultos - misma cifra aparece 3 veces (fila ES, fila EN, fila Totales)
-    if total_cajas:
-        xml = xml.replace('>239<', '>' + total_cajas + '<')
+    # Filas de producto ES/EN - se ubican por el texto fijo de categoria (no
+    # por indice de fila fijo, para no depender de cuantas filas de encabezado
+    # tenga cada version de la plantilla)
+    _, _, _, idx_es = _get_fila_por_contenido(xml, trs, 'PRODUCTO CRUDO INTACTO')
+    if idx_es is not None:
+        fila_es, ini_es, fin_es = get_fila_xml(xml, trs, idx_es)
+        fila_en, ini_en, fin_en = get_fila_xml(xml, trs, idx_es + 1)
 
-    # Fecha de producción - aparece 2 veces con valores de ejemplo distintos
-    # en la plantilla; ambas se completan con el mismo rango real.
-    if fecha_prod_fmt:
-        xml = xml.replace('>26/06/2026 al/to 03/07/2026<', '>' + fecha_prod_fmt + '<')
-        xml = xml.replace('>30/06/2026 al/to 08/07/2026<', '>' + fecha_prod_fmt + '<')
+        nueva_es = fila_es
+        if total_cajas:    nueva_es = _reemplazar_celda(nueva_es, 0, total_cajas)
+        if f_faena_fmt:    nueva_es = _reemplazar_celda(nueva_es, 5, f_faena_fmt)
+        if fecha_prod_fmt: nueva_es = _reemplazar_celda(nueva_es, 6, fecha_prod_fmt)
+        if contramarca:    nueva_es = _reemplazar_celda(nueva_es, 7, contramarca)
+        if lote_fmt:       nueva_es = _reemplazar_celda(nueva_es, 8, lote_fmt)
+        if peso_neto_kg:   nueva_es = _reemplazar_celda(nueva_es, 9, peso_neto_kg.replace('.', ',') + ' KGS')
 
-    # Marca de embarque / Contramarca - aparece 2 veces (fila ES y fila EN)
-    if contramarca:
-        xml = xml.replace('>C221<', '>' + contramarca + '<')
+        nueva_en = fila_en
+        if f_faena_fmt:    nueva_en = _reemplazar_celda(nueva_en, 5, f_faena_fmt)
+        if fecha_prod_fmt: nueva_en = _reemplazar_celda(nueva_en, 6, fecha_prod_fmt)
+        if contramarca:    nueva_en = _reemplazar_celda(nueva_en, 7, contramarca)
+        if lote_fmt:       nueva_en = _reemplazar_celda(nueva_en, 8, lote_fmt)
+        if peso_neto_lbs:  nueva_en = _reemplazar_celda(nueva_en, 9, peso_neto_lbs.replace('.', ',') + ' LBS')
 
-    # Lote - mismo rango que fecha de producción, en formato YYYYMMDD
-    if lote_fmt:
-        xml = xml.replace('>20260630 al/to 20260708<', '>' + lote_fmt + '<')
+        xml = xml[:ini_es] + nueva_es + nueva_en + xml[fin_en:]
 
-    # Peso neto en KGS y en LBS (el texto va junto a la unidad en el mismo run)
-    if peso_neto_kg:
-        kg_fmt = peso_neto_kg.replace('.', ',')
-        xml = xml.replace('>4594,00 KGS<', '>' + kg_fmt + ' KGS<')
-        xml = xml.replace('>4594,00<', '>' + kg_fmt + '<')
-    if peso_neto_lbs:
-        lbs_fmt = peso_neto_lbs.replace('.', ',')
-        xml = xml.replace('>10128,02 LBS<', '>' + lbs_fmt + ' LBS<')
-        xml = xml.replace('>10128,02<', '>' + lbs_fmt + '<')
+    # Fila de Totales - se ubica por el texto "Totales / Total", no por indice fijo
+    trs2 = get_trs(xml)
+    _, _, _, idx_tot = _get_fila_por_contenido(xml, trs2, 'Totales / Total')
+    if idx_tot is not None:
+        fila_tot, ini_tot, fin_tot = get_fila_xml(xml, trs2, idx_tot)
+        nueva_tot = fila_tot
+        if total_cajas: nueva_tot = _reemplazar_celda(nueva_tot, 0, total_cajas)
+        celda_starts = [m.start() for m in re.finditer(r'<w:tc>', nueva_tot)]
+        celda_ends   = [m.start() for m in re.finditer(r'</w:tc>', nueva_tot)]
+        if len(celda_starts) > 2:
+            bloque = nueva_tot[celda_starts[2]:celda_ends[2]]
+            if peso_neto_kg:
+                kg_fmt = peso_neto_kg.replace('.', ',')
+                bloque = re.sub(r'[\d\.,]+((?:\s|<[^>]+>)*?KGS)', kg_fmt + r'\1', bloque, count=1)
+            if peso_neto_lbs:
+                lbs_fmt = peso_neto_lbs.replace('.', ',')
+                bloque = re.sub(r'[\d\.,]+((?:\s|<[^>]+>)*?LBS)', lbs_fmt + r'\1', bloque, count=1)
+            nueva_tot = nueva_tot[:celda_starts[2]] + bloque + nueva_tot[celda_ends[2]:]
+        xml = xml[:ini_tot] + nueva_tot + xml[fin_tot:]
 
-    # Fecha límite de conservación (I.15)
+    # Fecha limite de conservacion (I.15) - anclada al label, no al valor de ejemplo
     if fecha_venc_fmt:
-        xml = xml.replace('>31/08/2026 al/to 05/11/2026<', '>' + fecha_venc_fmt + '<')
+        patron_venc = re.compile(
+            r'(Limit conservation date:(?:\s|<[^>]+>)*?)\d{2}/\d{2}/\d{4}\s+al/to\s+\d{2}/\d{2}/\d{4}',
+            re.IGNORECASE
+        )
+        xml = patron_venc.sub(lambda m: m.group(1) + fecha_venc_fmt, xml, count=1)
 
-    # Fecha de emisión (pie del certificado)
-    xml = xml.replace('>13/07/2026<', '>' + fecha_emi + '<')
+    # Fecha de emision (pie del certificado) - siempre es la ultima fecha
+    # dd/mm/yyyy del documento, posicionalmente.
+    todas_fechas = list(re.finditer(r'\d{2}/\d{2}/\d{4}', xml))
+    if todas_fechas:
+        ultima = todas_fechas[-1]
+        xml = xml[:ultima.start()] + fecha_emi + xml[ultima.end():]
 
     return xml, alertas
 
@@ -1472,38 +1604,66 @@ def _gen_usa_orleans(xml, datos):
 
     xml = xml[:ini_mod] + nuevas_filas + xml[ini_totales:]
 
-    # Totales (aparecen 2 veces: resumen en pagina 1 "VER ANEXO" y al pie del anexo)
+    # Totales (aparecen 2 veces: resumen en pagina 1 "VER ANEXO" y al pie del
+    # anexo). Se ubican por el texto "Totales / Total" en vez de asumir un
+    # indice de fila fijo, y el KG/LBS se reemplaza tolerando que el numero y
+    # la unidad puedan quedar en runs XML separados.
     total_cajas = str(datos.get('total_cajas', '') or '')
     total_neto_fmt = formatear_miles(datos.get('total_neto', ''))
     total_lbs_fmt  = formatear_miles(kg_a_lbs(datos.get('total_neto', '')))
-    if total_cajas:
-        xml = re.sub(r'\b1170\b', total_cajas, xml)
-    if total_neto_fmt:
-        xml = re.sub(r'21284,00(\s*KGS)', total_neto_fmt + r'\1', xml)
-    if total_lbs_fmt:
-        xml = re.sub(r'46923,13(\s*LBS)', total_lbs_fmt + r'\1', xml)
 
-    # Transporte (buque - Orleans es maritimo)
+    trs_tot = get_trs(xml)
+    filas_totales = []
+    for i, m in enumerate(trs_tot):
+        fila_cand, _, _ = get_fila_xml(xml, trs_tot, i)
+        if 'Totales' in fila_cand and 'Total' in fila_cand:
+            filas_totales.append(i)
+    # Procesar de atras para adelante para no invalidar los offsets ya calculados
+    for idx_f in reversed(filas_totales):
+        fila_t, ini_t, fin_t = get_fila_xml(xml, get_trs(xml), idx_f)
+        nueva_t = fila_t
+        if total_cajas:
+            nueva_t = _reemplazar_celda(nueva_t, 0, total_cajas)
+        if total_neto_fmt:
+            nueva_t = re.sub(r'[\d\.,]+((?:\s|<[^>]+>)*?KGS)', total_neto_fmt + r'\1', nueva_t, count=1)
+        if total_lbs_fmt:
+            nueva_t = re.sub(r'[\d\.,]+((?:\s|<[^>]+>)*?LBS)', total_lbs_fmt + r'\1', nueva_t, count=1)
+        trs_actual = get_trs(xml)
+        _, ini_t2, fin_t2 = get_fila_xml(xml, trs_actual, idx_f)
+        xml = xml[:ini_t2] + nueva_t + xml[fin_t2:]
+
+    # Transporte (buque - Orleans es maritimo) - anclado al label
     transporte = datos.get('transporte', '') or ''
-    if transporte: xml = xml.replace('MAERSK MONTE AZUL', transporte)
+    if transporte:
+        xml = _reemplazar_tras_label(xml, r'Buque:\s*/\s*Vessel\s*:', transporte)
 
-    # Contenedor
+    # Contenedor - anclado al label
     contenedor = datos.get('contenedor', '') or ''
-    if contenedor: xml = xml.replace('MNBU3586542', contenedor)
+    if contenedor:
+        xml = _reemplazar_tras_label(xml, r'Contenedor N°\)\s*/\s*Container Identification:', contenedor)
     if not contenedor: alertas.append('Contenedor no encontrado - completar manualmente')
 
-    # Precinto (un solo campo en esta plantilla - se usa el de AFIP)
+    # Precinto (un solo campo en esta plantilla - se usa el de AFIP) - anclado al label
     precinto = datos.get('precinto_afip') or datos.get('precinto_senasa') or ''
-    if precinto: xml = xml.replace('BAH74541', precinto)
+    if precinto:
+        xml = _reemplazar_tras_label(xml, r'Precinto/s\s*/\s*Seal/s:', precinto)
     if not precinto: alertas.append('Precinto no encontrado - completar manualmente')
 
-    # Fecha limite de conservacion (I.15)
+    # Fecha limite de conservacion (I.15) - anclada al label
     f_venc_fmt = fmt_fecha_al_to_usa(datos.get('fecha_vencimiento', '') or '')
-    if f_venc_fmt: xml = xml.replace('26/08/2026 al/to 30/10/2026', f_venc_fmt)
+    if f_venc_fmt:
+        patron_venc = re.compile(
+            r'(Limit conservation date:(?:\s|<[^>]+>)*?)\d{2}/\d{2}/\d{4}\s+al/to\s+\d{2}/\d{2}/\d{4}',
+            re.IGNORECASE
+        )
+        xml = patron_venc.sub(lambda m: m.group(1) + f_venc_fmt, xml, count=1)
 
-    # Fecha de emision (aparece 2 veces: certificacion pag.2 y firma del anexo pag.3)
+    # Fecha de emision (aparece 2 veces: certificacion pag.2 y firma del anexo
+    # pag.3) - son siempre las 2 ultimas fechas dd/mm/yyyy del documento.
     fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
-    xml = xml.replace('21/07/2026', fecha_emi)
+    todas_fechas = list(re.finditer(r'\d{2}/\d{2}/\d{4}', xml))
+    for m in reversed(todas_fechas[-2:]):
+        xml = xml[:m.start()] + fecha_emi + xml[m.end():]
 
     return xml, alertas
 
@@ -1665,6 +1825,79 @@ def _gen_alle_processing(xml, datos):
     # Fecha de emision (pie del certificado) - esta plantilla la deja vacia por
     # defecto (no trae un valor de ejemplo), hay que insertarla.
     xml = xml.replace('Date:   </w:t>', 'Date:   ' + fecha_emi + '</w:t>', 1)
+
+    return xml, alertas
+
+
+# ── FILIPINAS (aereo/maritimo) ───────────────────────────────────────────────
+# Nombre bilingue en UNA sola linea (no ES/EN separadas como Malasia/Singapur).
+# Numeros en formato ingles/EEUU (coma miles, punto decimal). Fecha de faena/
+# produccion/vencimiento son un rango unico por envio (no por producto). El
+# checkbox de temperatura se mueve dinamicamente (un solo archivo cubre
+# enfriado y congelado), igual que Malasia/Singapur.
+
+def _gen_filipinas(xml, datos, tipo_via):
+    alertas = []
+    trs = get_trs(xml)
+
+    _, _, _, header_idx = _get_fila_por_contenido(xml, trs, 'Number of packages')
+    primera_idx = (header_idx + 1) if header_idx is not None else 5
+
+    _, _, _, total_idx = _get_fila_por_contenido(xml, trs, 'Total / es')
+    if total_idx is None:
+        total_idx = primera_idx + 6
+
+    fila_modelo, ini_mod, _ = get_fila_xml(xml, trs, primera_idx)
+    fila_total, ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx)
+
+    es_congelado = datos.get('es_congelado', False)
+
+    nuevas_filas = ''
+    for prod in datos.get('productos', []):
+        nombre_bi = armar_nombre_filipinas(prod, es_congelado)
+        nueva = fila_modelo
+        nueva = _reemplazar_celda(nueva, 0, str(prod.get('cajas', '')))
+        nueva = _reemplazar_celda(nueva, 1, nombre_bi)
+        nueva = _reemplazar_celda(nueva, 6, formatear_miles_en(prod.get('neto', '')))
+        nueva = _reemplazar_celda(nueva, 7, formatear_miles_en(prod.get('bruto', '')))
+        nuevas_filas += nueva
+
+    nueva_total = fila_total
+    nueva_total = _reemplazar_celda(nueva_total, 0, str(datos.get('total_cajas', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 2, formatear_miles_en(datos.get('total_neto', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 3, formatear_miles_en(datos.get('total_bruto', '')))
+
+    xml = xml[:ini_mod] + nuevas_filas + nueva_total + xml[fin_tot:]
+
+    # Fechas de faena / produccion / vencimiento (rango unico por envio)
+    trs2 = get_trs(xml)
+    xml = _reemplazar_fechas(xml, trs2, datos.get('fecha_faena', ''), datos.get('fecha_produccion', ''),
+                              datos.get('fecha_vencimiento', ''), fmt_fecha_al_to)
+
+    # Temperatura - un solo archivo cubre enfriado y congelado, se mueve la X
+    es_congelado = datos.get('es_congelado', False)
+    xml = _set_temperatura_singapur(xml, es_congelado, tipo_via=tipo_via)
+
+    # Transporte (buque/aerolinea)
+    transporte = datos.get('transporte', '') or ''
+    if transporte: xml = xml.replace('ZIM USA', transporte)
+
+    # Contenedor
+    contenedor = datos.get('contenedor', '') or ''
+    if contenedor: xml = xml.replace('MNBU4390003', contenedor)
+    if not contenedor: alertas.append('Contenedor no encontrado - completar manualmente')
+
+    # Precinto (un solo campo)
+    precinto = datos.get('precinto_afip') or datos.get('precinto_senasa') or ''
+    if precinto: xml = xml.replace('BAH74877', precinto)
+    if not precinto: alertas.append('Precinto no encontrado - completar manualmente')
+
+    # Fecha de emision (pie del certificado) - la ultima fecha dd/mm/yyyy del documento
+    fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
+    todas_fechas = list(re.finditer(r'\d{2}/\d{2}/\d{4}', xml))
+    if todas_fechas:
+        ultima = todas_fechas[-1]
+        xml = xml[:ultima.start()] + fecha_emi + xml[ultima.end():]
 
     return xml, alertas
 
