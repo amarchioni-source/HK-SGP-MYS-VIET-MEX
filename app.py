@@ -159,6 +159,7 @@ def generar():
             'filipinas':         'filipinas',
             'ecuador':           'ecuador',
             'egipto':            'egipto',
+            'brasil':            'brasil',
             'usaallecondimentada': 'condimentada',
             'usaallenatural':      'natural',
         }
@@ -440,9 +441,18 @@ def leer_remito(pdf_bytes):
             contenedor = m_iso.group(1) + '-' + m_iso.group(2)
     datos['contenedor'] = contenedor
     m_ps = re.search(r'P\.S\.[:\s]+([A-Z0-9/]+)', texto)
-    m_pa = re.search(r'P\.A\.[:\s]+([A-Z]{2,3}\s?\d{4,8})', texto)
+    m_pa = re.search(r'P\.A\.[:\s]+([A-Z]{2,3}\s?\d{4,8}(?:/\d+)?)', texto)
     datos['precinto_senasa'] = m_ps.group(1).strip() if m_ps else None
     datos['precinto_afip']   = m_pa.group(1).strip() if m_pa else None
+    m_camion = re.search(r'CAMION/ACOPLADO[:\s]*([A-Z0-9]+)\s*/\s*([A-Z0-9]*)[ \t]*$', texto, re.IGNORECASE | re.MULTILINE)
+    if m_camion:
+        camion   = m_camion.group(1).strip()
+        acoplado = m_camion.group(2).strip()
+        datos['camion']   = camion
+        datos['acoplado'] = acoplado or None
+        datos['camion_acoplado'] = (camion + '/ ' + acoplado) if acoplado else camion
+    else:
+        datos['camion'] = datos['acoplado'] = datos['camion_acoplado'] = None
     m_contra = re.search(r'CONTRAMARCA[:\s]+([^\n\r]+)', texto, re.IGNORECASE)
     contra = m_contra.group(1).strip() if m_contra else ''
     datos['contramarca'] = contra if contra else None
@@ -826,6 +836,44 @@ def armar_nombre_egipto(prod):
     return es
 
 
+# ── NOMBRES ESPECIFICOS BRASIL (nombre bilingue de una sola linea) ──────────
+# A diferencia de Ecuador, Brasil NO fusiona filas (cada linea del remito
+# queda como su propia fila, aunque el nombre simplificado coincida entre
+# variantes de peso).
+MAPA_BRASIL = {
+    'TAPA DE CUADRIL':      'PICANHA',
+    'COLITA DE CUADRIL':    'MAMINHA',
+    'ENTRAÑA FINA':         'FRALDINHA',
+    'BIFE DE VACIO GRANDE': 'FRALDA',
+    'BIFE ANCHO':           'FILE DE COSTELA',
+}
+CLAVES_BRASIL = sorted(MAPA_BRASIL.keys(), key=len, reverse=True)
+
+
+def limpiar_nombre_es_brasil(desc_original):
+    """Nombre en español simplificado para Brasil: quita el rango de peso
+    (ej. 'A -1.6'), el pais destino '(BR)' y todo lo que sigue, y el
+    calificativo suelto 'BR' si quedo afuera del parentesis."""
+    d = (desc_original or '').upper()
+    d = re.sub(r'\s+A\s*[+\-]\s*\d+[,.]\d+', '', d)
+    d = d.split('(')[0].strip()
+    d = re.sub(r'\bBR\b', '', d).strip()
+    return re.sub(r'\s+', ' ', d)
+
+
+def armar_nombre_brasil(prod):
+    """Arma el nombre bilingue de una sola linea 'ES / PT' para Brasil. Si el
+    corte no esta todavia en MAPA_BRASIL, cae al nombre en español solo (sin
+    version en portugues) en vez de dejar la celda vacia."""
+    desc_original = prod.get('desc_original', '')
+    es = limpiar_nombre_es_brasil(desc_original)
+    d = (desc_original or '').upper()
+    for clave in CLAVES_BRASIL:
+        if clave in d:
+            return es + ' / ' + MAPA_BRASIL[clave]
+    return es
+
+
 def armar_nombre_filipinas(prod, es_congelado):
     """Arma el nombre bilingue de una sola linea 'ES / EN' para Filipinas. Si el
     corte no esta todavia en MAPA_FILIPINAS, cae a la descripcion completa del
@@ -1192,6 +1240,8 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
         xml, al = _gen_ecuador(xml, datos)
     elif destino == 'egipto':
         xml, al = _gen_egipto(xml, datos)
+    elif destino == 'brasil':
+        xml, al = _gen_brasil(xml, datos)
     else:
         if tipo_via == 'aereo':
             xml, al = _gen_malasia_aereo(xml, datos)
@@ -2257,6 +2307,91 @@ def _gen_egipto(xml, datos):
     precinto = datos.get('precinto_afip') or datos.get('precinto_senasa') or ''
     if precinto: xml = xml.replace('BAH74974', precinto)
     if not precinto: alertas.append('Precinto no encontrado - completar manualmente')
+
+    # Fecha de emision (pie del certificado) - la ultima fecha dd/mm/yyyy del documento
+    fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
+    todas_fechas = list(re.finditer(r'\d{2}/\d{2}/\d{4}', xml))
+    if todas_fechas:
+        ultima = todas_fechas[-1]
+        xml = xml[:ultima.start()] + fecha_emi + xml[ultima.end():]
+
+    return xml, alertas
+
+
+# ── BRASIL ────────────────────────────────────────────────────────────────
+# Nombre bilingue de una sola linea (ES/PT), sin fusionar filas (a diferencia
+# de Ecuador, cada linea del remito queda como su propia fila). Cada fila
+# lleva el mismo rango de fecha de produccion (no por producto). Es por
+# camion (frontera terrestre), no buque/avion - usa la patente del
+# camion/acoplado del remito en vez de Buque/Aerolinea. Precinto SENASA y
+# AFIP van en 2 campos separados (no combinados en uno solo).
+
+def _gen_brasil(xml, datos):
+    alertas = []
+    trs = get_trs(xml)
+
+    _, _, _, idx_subheader = _get_fila_por_contenido(xml, trs, 'CARNE BOVINA ENFRIADA SIN HUESO')
+    primera_idx = (idx_subheader + 1) if idx_subheader is not None else 6
+
+    fila_pal, ini_pal, fin_pal, idx_pal = _get_fila_por_contenido(xml, trs, 'ACONDICIONADO EM')
+
+    _, _, _, total_idx = _get_fila_por_contenido(xml, trs, 'Total / es')
+    if total_idx is None:
+        total_idx = primera_idx + 10
+
+    fila_modelo, ini_mod, _ = get_fila_xml(xml, trs, primera_idx)
+    fila_total, ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx)
+
+    f_prod_fmt = fmt_fecha_al_minuscula(datos.get('fecha_produccion', '') or '')
+
+    nuevas_filas = ''
+    for prod in datos.get('productos', []):
+        nombre_bi = armar_nombre_brasil(prod)
+        nueva = fila_modelo
+        nueva = _reemplazar_celda(nueva, 0, str(prod.get('cajas', '')))
+        nueva = _reemplazar_celda(nueva, 1, nombre_bi)
+        if f_prod_fmt:
+            nueva = _reemplazar_celda(nueva, 5, f_prod_fmt)
+        nueva = _reemplazar_celda(nueva, 6, str(prod.get('neto', '')).replace('.', ','))
+        nueva = _reemplazar_celda(nueva, 7, str(prod.get('bruto', '')).replace('.', ','))
+        nuevas_filas += nueva
+
+    pallets = datos.get('pallets', '') or ''
+    kg_pallets_raw = datos.get('kg_pallets', '') or ''
+    kg_pallets = kg_pallets_raw.replace('.', ',') if kg_pallets_raw else ''
+    nueva_pal = _reemplazar_pallets_en_fila(fila_pal, pallets, kg_pallets) if (fila_pal and pallets) else (fila_pal or '')
+
+    nueva_total = fila_total
+    nueva_total = _reemplazar_celda(nueva_total, 0, str(datos.get('total_cajas', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 2, str(datos.get('total_neto', '')).replace('.', ','))
+    nueva_total = _reemplazar_celda(nueva_total, 3, str(datos.get('total_bruto', '')).replace('.', ','))
+
+    xml = xml[:ini_mod] + nuevas_filas + nueva_pal + nueva_total + xml[fin_tot:]
+
+    # Fechas de faena / produccion / vencimiento (resumen al pie, rango unico por envio)
+    trs2 = get_trs(xml)
+    xml = _reemplazar_fechas(xml, trs2, datos.get('fecha_faena', ''), datos.get('fecha_produccion', ''),
+                              datos.get('fecha_vencimiento', ''), fmt_fecha_al_minuscula)
+
+    # Temperatura - un solo archivo cubre enfriado y congelado, se mueve la X
+    es_congelado = datos.get('es_congelado', False)
+    xml = _set_temperatura_singapur(xml, es_congelado, tipo_via='maritimo')
+
+    # Transporte - es por camion (frontera terrestre), usa la patente del
+    # camion/acoplado del remito en vez de Buque/Aerolinea
+    camion_acoplado = datos.get('camion_acoplado', '') or datos.get('camion', '') or ''
+    if camion_acoplado:
+        xml = xml.replace('TPW4B00/ TPN4D18', camion_acoplado)
+    else:
+        alertas.append('Patente de camión/acoplado no encontrada - completar manualmente')
+
+    # Precinto SENASA y AFIP van en 2 campos separados (no combinados)
+    precinto_senasa = datos.get('precinto_senasa', '') or ''
+    if precinto_senasa: xml = xml.replace('0042221/28', precinto_senasa, 1)
+    precinto_afip = datos.get('precinto_afip', '') or ''
+    if precinto_afip: xml = xml.replace('DM77867/68', precinto_afip, 1)
+    if not (precinto_senasa or precinto_afip):
+        alertas.append('Precinto no encontrado - completar manualmente')
 
     # Fecha de emision (pie del certificado) - la ultima fecha dd/mm/yyyy del documento
     fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
