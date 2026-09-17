@@ -46,13 +46,18 @@
       padding: 3px 9px; border-radius: 12px; letter-spacing: 0.2px;
       border: 1px solid #dbe3ee;
     }
-    .form-group { margin-bottom: 20px; }
+    .form-group { margin-bottom: 24px; }
     label {
       display: block;
-      font-size: 13px;
-      font-weight: 600;
-      color: #374151;
-      margin-bottom: 6px;
+      font-size: 15px;
+      font-weight: 700;
+      color: #1a3a5c;
+      margin-bottom: 8px;
+      letter-spacing: 0.1px;
+      background: #eef2f7;
+      border-left: 4px solid #1a3a5c;
+      border-radius: 6px;
+      padding: 7px 12px;
     }
     .hint { font-size: 11px; color: #9ca3af; margin-bottom: 6px; display: block; }
     .badge {
@@ -95,7 +100,17 @@
     .file-drop .icon { font-size: 24px; margin-bottom: 4px; }
     .file-drop .label { font-size: 13px; color: #6b7280; }
     .file-drop .label strong { color: #1a3a5c; }
-    .file-drop .filename { margin-top: 6px; font-size: 13px; color: #059669; font-weight: 600; }
+    .filename-row {
+      display: flex; align-items: center; justify-content: center;
+      gap: 8px; margin-top: 6px;
+    }
+    .filename-row .filename { font-size: 13px; color: #059669; font-weight: 600; }
+    .btn-quitar {
+      background: #fee2e2; color: #991b1b; border: none;
+      border-radius: 5px; font-size: 11px; font-weight: 700;
+      padding: 2px 8px; cursor: pointer; white-space: nowrap;
+    }
+    .btn-quitar:hover { background: #fecaca; }
     .btn-generar {
       width: 100%;
       padding: 14px;
@@ -217,10 +232,13 @@
       <label>Piqueo <span class="badge badge-xlsx">XLSX</span></label>
       <span class="hint">Ej: PIQUEO_9500_PEDIDO_213593.xlsx</span>
       <div class="file-drop">
-        <input type="file" name="piqueo" accept=".xlsx" onchange="mostrarNombre(this,'nombre-piqueo')"/>
+        <input type="file" name="piqueo" accept=".xlsx" onchange="mostrarNombre(this,'nombre-piqueo','fila-piqueo')"/>
         <div class="icon">📋</div>
         <div class="label"><strong>Clic para elegir</strong> o arrastrar aquí</div>
-        <div class="filename" id="nombre-piqueo"></div>
+      </div>
+      <div class="filename-row" id="fila-piqueo" style="display:none;">
+        <span class="filename" id="nombre-piqueo"></span>
+        <button type="button" class="btn-quitar" onclick="quitarArchivo('piqueo','nombre-piqueo','fila-piqueo')">✕ Quitar</button>
       </div>
     </div>
 
@@ -232,10 +250,13 @@
       </label>
       <span class="hint">PDF escaneado del certificado SENASA provisorio</span>
       <div class="file-drop">
-        <input type="file" name="sanitario" accept=".pdf" onchange="mostrarNombre(this,'nombre-sanitario')"/>
+        <input type="file" name="sanitario" accept=".pdf" onchange="mostrarNombre(this,'nombre-sanitario','fila-sanitario')"/>
         <div class="icon">📄</div>
         <div class="label"><strong>Clic para elegir</strong> o arrastrar aquí</div>
-        <div class="filename" id="nombre-sanitario"></div>
+      </div>
+      <div class="filename-row" id="fila-sanitario" style="display:none;">
+        <span class="filename" id="nombre-sanitario"></span>
+        <button type="button" class="btn-quitar" onclick="quitarArchivo('sanitario','nombre-sanitario','fila-sanitario')">✕ Quitar</button>
       </div>
     </div>
 
@@ -246,10 +267,13 @@
       </label>
       <span class="hint">Solo si el destino separa carne y menudencias en 2 certificados (ej. Ecuador) - se suman los pallets/kg de ambos</span>
       <div class="file-drop">
-        <input type="file" name="sanitario2" accept=".pdf" onchange="mostrarNombre(this,'nombre-sanitario2')"/>
+        <input type="file" name="sanitario2" accept=".pdf" onchange="mostrarNombre(this,'nombre-sanitario2','fila-sanitario2')"/>
         <div class="icon">📄</div>
         <div class="label"><strong>Clic para elegir</strong> o arrastrar aquí</div>
-        <div class="filename" id="nombre-sanitario2"></div>
+      </div>
+      <div class="filename-row" id="fila-sanitario2" style="display:none;">
+        <span class="filename" id="nombre-sanitario2"></span>
+        <button type="button" class="btn-quitar" onclick="quitarArchivo('sanitario2','nombre-sanitario2','fila-sanitario2')">✕ Quitar</button>
       </div>
     </div>
 
@@ -257,10 +281,13 @@
       <label>Remito <span class="badge badge-pdf">PDF</span></label>
       <span class="hint">Ej: RTO_1894.pdf</span>
       <div class="file-drop">
-        <input type="file" name="remito" accept=".pdf" onchange="mostrarNombre(this,'nombre-remito')"/>
+        <input type="file" name="remito" accept=".pdf" onchange="mostrarNombre(this,'nombre-remito','fila-remito')"/>
         <div class="icon">🧾</div>
         <div class="label"><strong>Clic para elegir</strong> o arrastrar aquí</div>
-        <div class="filename" id="nombre-remito"></div>
+      </div>
+      <div class="filename-row" id="fila-remito" style="display:none;">
+        <span class="filename" id="nombre-remito"></span>
+        <button type="button" class="btn-quitar" onclick="quitarArchivo('remito','nombre-remito','fila-remito')">✕ Quitar</button>
       </div>
     </div>
 
@@ -268,10 +295,13 @@
       <label>Reporte DOC <span class="badge badge-xlsx">XLSX</span></label>
       <span class="hint">Ej: REPORTE_DOC_27_04_DEVESA_XXXXX.xlsx</span>
       <div class="file-drop">
-        <input type="file" name="reporte" accept=".xlsx" onchange="mostrarNombre(this,'nombre-reporte')"/>
+        <input type="file" name="reporte" accept=".xlsx" onchange="mostrarNombre(this,'nombre-reporte','fila-reporte')"/>
         <div class="icon">📊</div>
         <div class="label"><strong>Clic para elegir</strong> o arrastrar aquí</div>
-        <div class="filename" id="nombre-reporte"></div>
+      </div>
+      <div class="filename-row" id="fila-reporte" style="display:none;">
+        <span class="filename" id="nombre-reporte"></span>
+        <button type="button" class="btn-quitar" onclick="quitarArchivo('reporte','nombre-reporte','fila-reporte')">✕ Quitar</button>
       </div>
     </div>
 
@@ -291,9 +321,19 @@
 </div>
 
 <script>
-  function mostrarNombre(input, id) {
+  function mostrarNombre(input, id, filaId) {
     const el = document.getElementById(id);
-    if (input.files && input.files[0]) el.textContent = '✓ ' + input.files[0].name;
+    if (input.files && input.files[0]) {
+      el.textContent = '✓ ' + input.files[0].name;
+      if (filaId) document.getElementById(filaId).style.display = 'flex';
+    }
+  }
+
+  function quitarArchivo(inputName, filenameId, filaId) {
+    const form = document.getElementById('form-sanitario');
+    form[inputName].value = '';
+    document.getElementById(filenameId).textContent = '';
+    document.getElementById(filaId).style.display = 'none';
   }
 
   document.querySelectorAll('.file-drop').forEach(zone => {
