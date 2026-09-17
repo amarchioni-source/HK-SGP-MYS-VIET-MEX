@@ -544,7 +544,7 @@ def leer_remito(pdf_bytes):
             contenedor = m_iso.group(1) + '-' + m_iso.group(2)
     datos['contenedor'] = contenedor
     m_ps = re.search(r'P\.S\.[:\s]+([A-Z0-9/]+)', texto)
-    m_pa = re.search(r'P\.A\.[:\s]+([A-Z]{2,3}\s?\d{4,8}(?:/\d+)?)', texto)
+    m_pa = re.search(r'P\.A\.[:\s]+([A-Z]{2,3}\s?\d{4,8}(?:/\d+)*)', texto)
     datos['precinto_senasa'] = m_ps.group(1).strip() if m_ps else None
     datos['precinto_afip']   = m_pa.group(1).strip() if m_pa else None
     m_camion = re.search(r'CAMION/ACOPLADO[:\s]*([A-Z0-9]+)\s*/\s*([A-Z0-9]*)[ \t]*$', texto, re.IGNORECASE | re.MULTILINE)
@@ -661,9 +661,13 @@ def leer_sanitario_provisorio(pdf_bytes):
         datos['fecha_vencimiento_prov'] = m_venc_p.group(1) + ' al ' + m_venc_p.group(2)
 
     # Patente de transporte (a veces con 2 chapas, ej. Peru: "Patente Transporte:
-    # ADK931 / Z1V990") - el remito a veces solo trae la primera
+    # ADK931 / Z1V990") - el remito a veces solo trae la primera. El texto
+    # entre "patente" y los valores tolera basura de OCR (ej. "patente S NE
+    # ADLSSS /BAG9TS" en vez de "patente N°: ADL886 /BAG975") - au ncuando el
+    # OCR lea mal algun caracter de la patente en si, al menos la ESTRUCTURA
+    # (dos patentes separadas por "/") se reconoce.
     m_patente = re.search(
-        r'(?:Patente\s*Transporte|Cami[oó]n\s*patente\s*N[°ºo*]?)\s*:?\s*([A-Z0-9]+)\s*/\s*([A-Z0-9]+)',
+        r'(?:Patente\s*Transporte|Cami[oó]n\s*patente).{0,20}?([A-Z0-9]{5,8})\s*/\s*([A-Z0-9]{5,8})',
         texto, re.IGNORECASE
     )
     if m_patente:
@@ -2710,18 +2714,17 @@ def _gen_peru_enfriado(xml, datos):
     xml = _reemplazar_fechas(xml, trs2, datos.get('fecha_faena', ''), datos.get('fecha_produccion', ''),
                               datos.get('fecha_vencimiento', ''), fmt_fecha_al)
 
-    # Transporte (terrestre) - patente principal + segunda chapa (del
-    # provisorio, no del remito). Formato XXX-NNN si matchea 3 letras + 3 numeros.
-    def _formatear_patente(p):
-        p = (p or '').upper().replace('-', '').replace(' ', '')
-        m = re.match(r'^([A-Z]{3})(\d{3})$', p)
-        return (m.group(1) + '-' + m.group(2)) if m else p
-
-    patente1 = datos.get('patente1') or datos.get('camion') or ''
+    # Transporte (terrestre) - patente principal + segunda chapa. La primera
+    # se prioriza del REMITO (texto real, no pasa por OCR); la segunda solo
+    # esta en el provisorio (OCR), asi que se avisa para que se verifique a
+    # mano - el OCR puede confundir digitos con letras en la patente.
+    patente1 = datos.get('camion') or datos.get('patente1') or ''
     patente2 = datos.get('patente2') or ''
     if patente1:
-        camion_chapa = _formatear_patente(patente1) + ('/' + patente2 if patente2 else '')
+        camion_chapa = patente1 + (' / ' + patente2 if patente2 else '')
         xml = _reemplazar_tras_label(xml, r'CAMION CHAPA:', camion_chapa)
+        if patente2:
+            alertas.append('Segunda patente (' + patente2 + ') leída por OCR del provisorio - verificar que sea correcta')
     else:
         alertas.append('Patente de camión no encontrada - completar manualmente')
 
