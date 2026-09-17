@@ -43,12 +43,83 @@ def generar():
         if not remito_f:    errores.append('Falta el Remito (PDF)')
         if not shipment:    errores.append('Falta el numero de Shipment')
         if not tipo_via:    errores.append('Selecciona la via (Aereo o Maritimo)')
+        if destino == 'perucongeladomenudencias' and not sanitario2_f:
+            errores.append('Perú Congelado + Menudencias necesita el Sanitario Provisorio 2 (de menudencias)')
         if errores:
             return jsonify({'ok': False, 'errores': errores}), 400
 
         datos_piqueo = leer_piqueo(piqueo_f)
         reporte      = leer_reporte(reporte_f, shipment)
         datos_remito = leer_remito(remito_f.read())
+
+        if destino == 'perucongeladomenudencias':
+            # Caso combinado: un solo remito trae carne + menudencia
+            # (identificadas por CODIGOS_MENUDENCIA_PERU), pero SENASA exige 2
+            # certificados separados, cada uno con su propio provisorio (no se
+            # suman como en Ecuador - cada documento lleva SU porcion de
+            # pallets/fechas, no el total combinado).
+            datos_prov_carne = leer_sanitario_provisorio(sanitario_f.read())
+            datos_prov_menud = leer_sanitario_provisorio(sanitario2_f.read())
+
+            todos_productos = datos_remito.get('productos', [])
+            productos_carne = [p for p in todos_productos if p.get('codigo') not in CODIGOS_MENUDENCIA_PERU]
+            productos_menud = [p for p in todos_productos if p.get('codigo') in CODIGOS_MENUDENCIA_PERU]
+
+            def _totales_subset(productos):
+                cajas = sum(float(p.get('cajas') or 0) for p in productos)
+                neto  = sum(float(p.get('neto') or 0) for p in productos)
+                bruto = sum(float(p.get('bruto') or 0) for p in productos)
+                return str(int(cajas)), '{:.2f}'.format(neto), '{:.2f}'.format(bruto)
+
+            def _armar_datos_subset(productos, datos_prov):
+                d = dict(datos_remito)
+                d['productos'] = productos
+                d['total_cajas'], d['total_neto'], d['total_bruto'] = _totales_subset(productos)
+                d['fecha_faena']       = datos_prov.get('fecha_faena_prov')
+                d['fecha_produccion']  = datos_prov.get('fecha_produccion_prov')
+                d['fecha_vencimiento'] = datos_prov.get('fecha_vencimiento_prov')
+                d['pallets']     = datos_prov.get('pallets_prov')
+                d['kg_pallets']  = datos_prov.get('kg_pallets')
+                if datos_remito.get('es_congelado') is not None:
+                    d['es_congelado'] = datos_remito['es_congelado']
+                d['fecha_emision'] = datos_prov.get('fecha_emision')
+                return d
+
+            datos_carne = _armar_datos_subset(productos_carne, datos_prov_carne)
+            datos_menud = _armar_datos_subset(productos_menud, datos_prov_menud)
+
+            todos_docx = [f for f in os.listdir(PLANT_DIR) if f.lower().endswith('.docx')]
+            cand_congelado = [f for f in todos_docx if 'peru' in _normalizar(f) and 'congelado' in _normalizar(f)]
+            cand_menud     = [f for f in todos_docx if 'peru' in _normalizar(f) and 'menudencia' in _normalizar(f)]
+            if not cand_congelado or not cand_menud:
+                return jsonify({'ok': False, 'errores': [
+                    'Faltan plantillas de Peru Congelado y/o Menudencias. Archivos: ' + str(todos_docx)
+                ]}), 500
+
+            with open(os.path.join(PLANT_DIR, cand_congelado[0]), 'rb') as f:
+                docx_congelado = f.read()
+            with open(os.path.join(PLANT_DIR, cand_menud[0]), 'rb') as f:
+                docx_menud = f.read()
+
+            res_carne, al_carne = generar_sanitario(docx_congelado, datos_carne, 'maritimo', 'perucongelado')
+            res_menud, al_menud = generar_sanitario(docx_menud, datos_menud, 'maritimo', 'perumenudencias')
+
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, 'w') as zf:
+                zf.writestr('Sanitario_Peru_Congelado_' + shipment + '.docx', res_carne)
+                zf.writestr('Sanitario_Peru_Menudencias_' + shipment + '.docx', res_menud)
+            buf.seek(0)
+
+            resp = send_file(
+                buf, as_attachment=True,
+                download_name='Sanitario_Peru_CongeladoMenudencias_' + shipment + '.zip',
+                mimetype='application/zip'
+            )
+            todas_alertas = al_carne + al_menud
+            if todas_alertas:
+                resp.headers['X-Alertas'] = ' | '.join(todas_alertas)
+            return resp
+
         datos_prov   = leer_sanitario_provisorio(sanitario_f.read())
 
         if sanitario2_f:
@@ -162,6 +233,7 @@ def generar():
             'brasil':            'brasil',
             'peruenfriado':      ('peru', 'enfriado'),
             'perumenudencias':   ('peru', 'menudencia'),
+            'perucongelado':     ('peru', 'congelado'),
             'usaallecondimentada': 'condimentada',
             'usaallenatural':      'natural',
         }
@@ -379,6 +451,18 @@ def expandir_contramarcas(campo):
     return ['C' + str(n) for n in numeros]
 
 
+def _es_numero(s):
+    """True si s es un numero parseable (ej. '2504.00'), usado para validar
+    filas de producto del remito antes de aceptarlas."""
+    if not s:
+        return False
+    try:
+        float(s)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def limpiar_num(s):
     if not s: return None
     s = str(s).strip().replace(' ', '')
@@ -446,6 +530,13 @@ def leer_remito(pdf_bytes):
             datos['tipo_transporte'] = 'maritimo'
     m_cont = re.search(r'CONTAINER[:\s]*([A-Z]{4}\d{6,7}-?\d?)', texto, re.IGNORECASE)
     contenedor = m_cont.group(1).strip() if m_cont else None
+    if not contenedor:
+        # Algunos PDF separan la etiqueta "CONTAINER:" de su valor al extraer
+        # el texto (el numero queda flotando en otra parte del documento) -
+        # como respaldo, se busca un codigo con forma de contenedor suelto.
+        m_cont_suelto = re.search(r'\b([A-Z]{4}\d{7})\b', texto)
+        if m_cont_suelto:
+            contenedor = m_cont_suelto.group(1)
     if contenedor and '-' not in contenedor:
         # Formato estandar ISO 6346: 4 letras + 6 digitos de serie + guion + 1 digito verificador
         m_iso = re.match(r'^([A-Z]{4}\d{6})(\d)$', contenedor)
@@ -489,13 +580,23 @@ def leer_remito(pdf_bytes):
             cajas     = lineas[i+2].strip() if i+2 < len(lineas) else ''
             neto_raw  = lineas[i+4].strip() if i+4 < len(lineas) else ''
             bruto_raw = lineas[i+5].strip() if i+5 < len(lineas) else ''
-            nombre_es = buscar_nombre_es_remito(desc)
-            productos.append({
-                'codigo': codigo, 'nombre_es': nombre_es, 'nombre_en': '',
-                'desc_original': desc,
-                'cajas': cajas, 'neto': limpiar_num(neto_raw), 'bruto': limpiar_num(bruto_raw),
-            })
-            i += 6
+            neto  = limpiar_num(neto_raw)
+            bruto = limpiar_num(bruto_raw)
+            # Validar que realmente sea una fila de producto (cantidad de cajas
+            # y pesos numericos) antes de aceptarla - evita falsos positivos
+            # como un numero de contenedor suelto al final del PDF que por
+            # casualidad matchea el patron de codigo (ej. "SEKU9270994").
+            es_fila_valida = bool(re.match(r'^\d+$', cajas)) and _es_numero(neto) and _es_numero(bruto)
+            if es_fila_valida:
+                nombre_es = buscar_nombre_es_remito(desc)
+                productos.append({
+                    'codigo': codigo, 'nombre_es': nombre_es, 'nombre_en': '',
+                    'desc_original': desc,
+                    'cajas': cajas, 'neto': neto, 'bruto': bruto,
+                })
+                i += 6
+            else:
+                i += 1
         else:
             i += 1
     datos['productos'] = productos
@@ -542,6 +643,22 @@ def leer_sanitario_provisorio(pdf_bytes):
     else:
         datos['es_congelado'] = False
     datos['fecha_emision'] = datetime.datetime.now().strftime('%d/%m/%Y')
+
+    # Fechas resumen del provisorio (faena/produccion/vencimiento), ancladas al
+    # inicio de linea para no confundirlas con las fechas de faena POR PRODUCTO
+    # que aparecen embebidas en cada renglon como "(F. faena: ...)". Se usan
+    # cuando hay que separar un envio en 2 documentos (ej. Peru
+    # congelado+menudencias) y cada documento necesita el rango de SU propio
+    # provisorio, no el agregado de todo el piqueo.
+    m_faena_p = re.search(r'^\s*Faena\s*:\s*(\d{2}/\d{2}/\d{4})\s*al\s*(\d{2}/\d{2}/\d{4})', texto, re.IGNORECASE | re.MULTILINE)
+    if m_faena_p:
+        datos['fecha_faena_prov'] = m_faena_p.group(1) + ' al ' + m_faena_p.group(2)
+    m_prod_p = re.search(r'^\s*(?:1\.11\s*Fecha\s*)?Producci[oó]n\s*:\s*(\d{2}/\d{2}/\d{4})\s*al\s*(\d{2}/\d{2}/\d{4})', texto, re.IGNORECASE | re.MULTILINE)
+    if m_prod_p:
+        datos['fecha_produccion_prov'] = m_prod_p.group(1) + ' al ' + m_prod_p.group(2)
+    m_venc_p = re.search(r'^\s*Vencimiento\s*:\s*(\d{2}/\d{2}/\d{4})\s*al\s*(\d{2}/\d{2}/\d{4})', texto, re.IGNORECASE | re.MULTILINE)
+    if m_venc_p:
+        datos['fecha_vencimiento_prov'] = m_venc_p.group(1) + ' al ' + m_venc_p.group(2)
 
     # Patente de transporte (a veces con 2 chapas, ej. Peru: "Patente Transporte:
     # ADK931 / Z1V990") - el remito a veces solo trae la primera
@@ -920,6 +1037,42 @@ MAPA_PERU_MENUDENCIAS = {
     'FD608018': 'HIGADO PE',
     'FD615001': 'MONDONGO SEMICOCIDO CON BONETE TP',
     'FD615004': 'MONDONGO SEMICOCIDO CON BONETE B',
+}
+
+
+MAPA_PERU_CONGELADO = {
+    'FD610001': 'CORAZON',
+    'FD611008': 'MOLLEJAS',
+    'FD256054': 'RECORTE DE CARNE VACUNA SIN HUESO PARA USO INDUSTRIAL RECORTE GR 80/20 AA',
+    'FD256005': 'RECORTE DE CARNE VACUNA SIN HUESO PARA USO INDUSTRIAL RECORTE GR 80/20 AA',
+    'FD219025': 'ENTRAÑA FINA GF AA',
+    'FD219010': 'ENTRAÑA FINA GF',
+    'FD216094': 'LOMO FINO GF AA',
+    'FD216003': 'LOMO FINO S/C 3/4 LBS',
+    'FD216019': 'LOMO FINO S/C 4/5 LBS',
+    'FD209337': 'CORAZON DE CUADRIL GF',
+    'FD214323': 'BIFE ANGOSTO',
+    'FD214326': 'BIFE ANGOSTO',
+    'FD209236': 'TAPA DE CUADRIL GF AA',
+    'FD209237': 'TAPA DE CUADRIL GF AA',
+    'FD214358': 'BIFE ANGOSTO GF AA',
+    'FD224342': 'BIFE ANCHO GF',
+    'FD224346': 'BIFE ANCHO GF AA',
+    'FD216093': 'LOMO FINO GF AA',
+    'FD221011': 'BIFE DE VACIO GF AA',
+    'FD220629': 'VACIO GF AA',
+}
+
+# Codigos confirmados de menudencia (organo) para Peru - se usan para separar
+# un envio combinado en 2 documentos (congelado + menudencias). Se va
+# ampliando con cada envio nuevo que Angie confirme, igual que las tablas de
+# nombres - mejor pecar de lista corta y pedir confirmacion para lo que no
+# este, que asumir mal.
+CODIGOS_MENUDENCIA_PERU = {
+    'FD610001',  # CORAZON (organo, no "CORAZON DE CUADRIL" que es corte de carne)
+    'FD608001', 'FD608018',  # HIGADO
+    'FD615001', 'FD615004',  # MONDONGO
+    'FD611008',  # MOLLEJAS
 }
 
 
@@ -1343,6 +1496,8 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
         xml, al = _gen_peru_enfriado(xml, datos)
     elif destino == 'perumenudencias':
         xml, al = _gen_peru_menudencias(xml, datos)
+    elif destino == 'perucongelado':
+        xml, al = _gen_peru_congelado(xml, datos)
     else:
         if tipo_via == 'aereo':
             xml, al = _gen_malasia_aereo(xml, datos)
@@ -2654,6 +2809,85 @@ def _gen_peru_menudencias(xml, datos):
     # Precinto (un solo campo - se usa el de AFIP)
     precinto = datos.get('precinto_afip') or datos.get('precinto_senasa') or ''
     if precinto: xml = xml.replace('BAH79560', precinto)
+    if not precinto: alertas.append('Precinto no encontrado - completar manualmente')
+
+    # Fecha de emision (pie del certificado) - la ultima fecha dd/mm/yyyy del documento
+    fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
+    todas_fechas = list(re.finditer(r'\d{2}/\d{2}/\d{4}', xml))
+    if todas_fechas:
+        ultima = todas_fechas[-1]
+        xml = xml[:ultima.start()] + fecha_emi + xml[ultima.end():]
+
+    return xml, alertas
+
+
+# ── PERU CONGELADO ────────────────────────────────────────────────────────
+# Independiente de Enfriado y Menudencias: es MARITIMO (buque, no camion, a
+# diferencia de Enfriado), precinto y contenedor en un solo campo cada uno,
+# numeros en formato argentino. Cuando el envio mezcla carne congelada con
+# menudencia, este es el documento de la parte de carne (ver
+# CODIGOS_MENUDENCIA_PERU y la logica de separacion en el route /generar).
+
+def _gen_peru_congelado(xml, datos):
+    alertas = []
+    trs = get_trs(xml)
+
+    _, _, _, header_idx = _get_fila_por_contenido(xml, trs, 'Descripción de la mercadería')
+    primera_idx = (header_idx + 1) if header_idx is not None else 5
+
+    fila_pal, ini_pal, fin_pal, idx_pal = _get_fila_por_contenido(xml, trs, 'ACONDICIONAD')
+
+    _, _, _, total_idx = _get_fila_por_contenido(xml, trs, 'Total / es')
+    if total_idx is None:
+        total_idx = primera_idx + 7
+
+    fila_modelo, ini_mod, _ = get_fila_xml(xml, trs, primera_idx)
+    fila_total, ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx)
+
+    nuevas_filas = ''
+    for prod in datos.get('productos', []):
+        nombre = armar_nombre_peru(prod, MAPA_PERU_CONGELADO)
+        nueva = fila_modelo
+        nueva = _reemplazar_celda(nueva, 0, str(prod.get('cajas', '')))
+        nueva = _reemplazar_celda(nueva, 1, nombre)
+        nueva = _reemplazar_celda(nueva, 6, formatear_miles(prod.get('neto', '')))
+        nueva = _reemplazar_celda(nueva, 7, formatear_miles(prod.get('bruto', '')))
+        nuevas_filas += nueva
+
+    pallets = datos.get('pallets', '') or ''
+    kg_pallets = datos.get('kg_pallets', '') or ''
+    nueva_pal = fila_pal or ''
+    if fila_pal and pallets:
+        nueva_pal = re.sub(r'(ACONDICIONADA EN\s*)\d+', r'\g<1>' + str(pallets), nueva_pal, count=1)
+        if kg_pallets:
+            kg_fmt = formatear_miles(kg_pallets)
+            nueva_pal = re.sub(r'[\d\.,]+((?:\s|<[^>]+>)*?KGS)', kg_fmt + r'\1', nueva_pal, count=1)
+
+    nueva_total = fila_total
+    nueva_total = _reemplazar_celda(nueva_total, 0, str(datos.get('total_cajas', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 2, formatear_miles(datos.get('total_neto', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 3, formatear_miles(datos.get('total_bruto', '')))
+
+    xml = xml[:ini_mod] + nuevas_filas + nueva_pal + nueva_total + xml[fin_tot:]
+
+    # Fechas de faena / produccion / vencimiento (rango unico por envio, o por
+    # el subconjunto de codigos si viene de una separacion carne/menudencia)
+    trs2 = get_trs(xml)
+    xml = _reemplazar_fechas(xml, trs2, datos.get('fecha_faena', ''), datos.get('fecha_produccion', ''),
+                              datos.get('fecha_vencimiento', ''), fmt_fecha_al)
+
+    # Transporte (buque)
+    transporte = datos.get('transporte', '') or ''
+    if transporte: xml = xml.replace('LAKONIA', transporte)
+
+    # Contenedor
+    contenedor = datos.get('contenedor', '') or ''
+    if contenedor: xml = xml.replace('SEKU9270994', contenedor)
+    if not contenedor: alertas.append('Contenedor no encontrado - completar manualmente')
+
+    # Precinto (un solo campo - se usa el de AFIP)
+    precinto = datos.get('precinto_afip') or datos.get('precinto_senasa') or ''
+    if precinto: xml = xml.replace('BAH74816', precinto)
     if not precinto: alertas.append('Precinto no encontrado - completar manualmente')
 
     # Fecha de emision (pie del certificado) - la ultima fecha dd/mm/yyyy del documento
