@@ -160,15 +160,27 @@ def generar():
             'ecuador':           'ecuador',
             'egipto':            'egipto',
             'brasil':            'brasil',
+            'peruenfriado':      ('peru', 'enfriado'),
+            'perumenudencias':   ('peru', 'menudencia'),
             'usaallecondimentada': 'condimentada',
             'usaallenatural':      'natural',
         }
         patron_via = 'aereo' if tipo_via == 'aereo' else 'mar'
         patron_dest = PATRONES_DESTINO.get(destino, PATRONES_DESTINO['malasia'])
         todos_docx = [f for f in os.listdir(PLANT_DIR) if f.lower().endswith('.docx')]
-        candidatos = [f for f in todos_docx if patron_dest in _normalizar(f) and patron_via in _normalizar(f)]
+
+        def _coincide(nombre_normalizado, patron):
+            # patron puede ser un string simple, o una tupla de palabras que
+            # deben estar TODAS presentes (para evitar colisiones entre
+            # destinos que comparten una sola palabra, ej. "enfriado" en
+            # Hong Kong y en Peru)
+            if isinstance(patron, tuple):
+                return all(p in nombre_normalizado for p in patron)
+            return patron in nombre_normalizado
+
+        candidatos = [f for f in todos_docx if _coincide(_normalizar(f), patron_dest) and patron_via in _normalizar(f)]
         if not candidatos:
-            candidatos = [f for f in todos_docx if patron_dest in _normalizar(f)]
+            candidatos = [f for f in todos_docx if _coincide(_normalizar(f), patron_dest)]
         if not candidatos:
             return jsonify({'ok': False, 'errores': [
                 'Plantilla no encontrada para destino=' + destino + ' via=' + tipo_via + '. Archivos: ' + str(os.listdir(PLANT_DIR))
@@ -531,6 +543,18 @@ def leer_sanitario_provisorio(pdf_bytes):
         datos['es_congelado'] = False
     datos['fecha_emision'] = datetime.datetime.now().strftime('%d/%m/%Y')
 
+    # Patente de transporte (a veces con 2 chapas, ej. Peru: "Patente Transporte:
+    # ADK931 / Z1V990") - el remito a veces solo trae la primera
+    m_patente = re.search(
+        r'(?:Patente\s*Transporte|Cami[oó]n\s*patente\s*N[°ºo*]?)\s*:?\s*([A-Z0-9]+)\s*/\s*([A-Z0-9]+)',
+        texto, re.IGNORECASE
+    )
+    if m_patente:
+        datos['patente1'] = m_patente.group(1).strip()
+        datos['patente2'] = m_patente.group(2).strip()
+    else:
+        datos['patente1'] = datos['patente2'] = None
+
     # Contramarca por linea, en el orden en que aparecen (formato USA con anexo,
     # ej. "55 ... - C208 ( Fecha de Faena: ... )"). El OCR a veces confunde la
     # 'C' del codigo con otro caracter (0, 9, etc.) - se ignora ese caracter y
@@ -859,6 +883,62 @@ def limpiar_nombre_es_brasil(desc_original):
     d = d.split('(')[0].strip()
     d = re.sub(r'\bBR\b', '', d).strip()
     return re.sub(r'\s+', ' ', d)
+
+
+# ── NOMBRES ESPECIFICOS PERU (por codigo de producto, tabla propia de Angie) ──
+# A diferencia de otros destinos, Peru tiene una tabla CODIGO -> DESCRIPCION ya
+# armada y confirmada (viene de "DESCRIPCION_DE_CAMION_Y_MULTI.xlsx"), separada
+# por Enfriado/Congelado. Se usa esa tabla como fuente principal por codigo
+# exacto, con una regla de limpieza de texto como respaldo para codigos que
+# todavia no esten en la tabla (quita el destino "PE"/"(PE)" y los
+# calificativos sueltos "CC"/"SC", pero conserva el grado de calidad GF/AA/MB2+).
+MAPA_PERU_ENFRIADO = {
+    'CD214022': 'BIFE ANGOSTO GF AA',
+    'CD220501': 'FALSA ENTRAÑA',
+    'CD220626': 'VACIO GF AA',
+    'CD214897': 'BIFE ANGOSTO GF AA MB2+',
+    'CD219000': 'ENTRAÑA FINA GF AA',
+    'CD213100': 'COLITA DE CUADRIL GF AA',
+    'CD214836': 'BIFE ANGOSTO GF',
+    'CV224316': 'BIFE ANCHO ST GF AA MB2+',
+    'CD264567': 'ASADO SIN HUESO GF AA',
+    'CD224850': 'BIFE ANCHO ST GF',
+    'CD216000': 'LOMO SC 3/4 LBS GF AA',
+    'CD209144': 'TAPA DE CUADRIL GF AA',
+    'CD209145': 'TAPA DE CUADRIL GF AA',
+    'CD224365': 'BIFE ANCHO ST GF AA',
+    'CV209300': 'CORAZON DE CUADRIL GF AA',
+    'CD221011': 'BIFE DE VACIO GF AA',
+    'CD264565': 'ASADO SIN HUESO GF AA',
+    'CD216143': 'LOMO SC 4/5 LBS GF AA',
+}
+
+
+MAPA_PERU_MENUDENCIAS = {
+    'FD610001': 'CORAZON',
+    'FD608001': 'HIGADO TP',
+    'FD608018': 'HIGADO PE',
+    'FD615001': 'MONDONGO SEMICOCIDO CON BONETE TP',
+    'FD615004': 'MONDONGO SEMICOCIDO CON BONETE B',
+}
+
+
+def limpiar_nombre_peru(desc_original):
+    """Respaldo para codigos que no estan en MAPA_PERU_ENFRIADO/CONGELADO: quita
+    el destino 'PE'/'(PE)' y los calificativos sueltos CC/SC, conservando el
+    grado de calidad (GF, AA, MB2+)."""
+    d = (desc_original or '').upper()
+    d = d.replace('(PE)', ' ')
+    d = re.sub(r'\bPE\b', ' ', d)
+    d = re.sub(r'\b(CC|SC)\b', ' ', d)
+    return re.sub(r'\s+', ' ', d).strip()
+
+
+def armar_nombre_peru(prod, mapa_codigos):
+    codigo = (prod.get('codigo', '') or '').strip().upper()
+    if codigo in mapa_codigos:
+        return mapa_codigos[codigo]
+    return limpiar_nombre_peru(prod.get('desc_original', ''))
 
 
 def armar_nombre_brasil(prod):
@@ -1259,6 +1339,10 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
         xml, al = _gen_egipto(xml, datos)
     elif destino == 'brasil':
         xml, al = _gen_brasil(xml, datos)
+    elif destino == 'peruenfriado':
+        xml, al = _gen_peru_enfriado(xml, datos)
+    elif destino == 'perumenudencias':
+        xml, al = _gen_peru_menudencias(xml, datos)
     else:
         if tipo_via == 'aereo':
             xml, al = _gen_malasia_aereo(xml, datos)
@@ -2410,6 +2494,167 @@ def _gen_brasil(xml, datos):
     xml = _reemplazar_ocurrencias_por_indice(xml, r'Número de precinto:', [precinto_senasa, precinto_afip])
     if not (precinto_senasa or precinto_afip):
         alertas.append('Precinto no encontrado - completar manualmente')
+
+    # Fecha de emision (pie del certificado) - la ultima fecha dd/mm/yyyy del documento
+    fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
+    todas_fechas = list(re.finditer(r'\d{2}/\d{2}/\d{4}', xml))
+    if todas_fechas:
+        ultima = todas_fechas[-1]
+        xml = xml[:ultima.start()] + fecha_emi + xml[ultima.end():]
+
+    return xml, alertas
+
+
+# ── PERU ENFRIADO ─────────────────────────────────────────────────────────
+# Nombre en una sola columna en español (sin bilingue), tomado por CODIGO
+# desde MAPA_PERU_ENFRIADO (tabla propia de Angie), con regla de limpieza de
+# texto como respaldo. Numeros con coma de miles (formato ingles) en todos
+# lados (productos y totales). Terrestre con transito por Chile - la segunda
+# patente del camion viene del provisorio, no del remito. Precinto SENASA y
+# AFIP van combinados en un solo campo con guion.
+
+def _gen_peru_enfriado(xml, datos):
+    alertas = []
+    trs = get_trs(xml)
+
+    _, _, _, header_idx = _get_fila_por_contenido(xml, trs, 'Descripción de la mercadería')
+    primera_idx = (header_idx + 1) if header_idx is not None else 5
+
+    fila_pal, ini_pal, fin_pal, idx_pal = _get_fila_por_contenido(xml, trs, 'ACONDICIONAD')
+
+    _, _, _, total_idx = _get_fila_por_contenido(xml, trs, 'Total / es')
+    if total_idx is None:
+        total_idx = primera_idx + 9
+
+    fila_modelo, ini_mod, _ = get_fila_xml(xml, trs, primera_idx)
+    fila_total, ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx)
+
+    nuevas_filas = ''
+    for prod in datos.get('productos', []):
+        nombre = armar_nombre_peru(prod, MAPA_PERU_ENFRIADO)
+        nueva = fila_modelo
+        nueva = _reemplazar_celda(nueva, 0, str(prod.get('cajas', '')))
+        nueva = _reemplazar_celda(nueva, 1, nombre)
+        nueva = _reemplazar_celda(nueva, 6, formatear_miles_en(prod.get('neto', '')))
+        nueva = _reemplazar_celda(nueva, 7, formatear_miles_en(prod.get('bruto', '')))
+        nuevas_filas += nueva
+
+    pallets = datos.get('pallets', '') or ''
+    kg_pallets = datos.get('kg_pallets', '') or ''
+    nueva_pal = _reemplazar_pallets_en_fila(fila_pal, pallets, kg_pallets) if (fila_pal and pallets) else (fila_pal or '')
+
+    nueva_total = fila_total
+    nueva_total = _reemplazar_celda(nueva_total, 0, str(datos.get('total_cajas', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 2, formatear_miles_en(datos.get('total_neto', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 3, formatear_miles_en(datos.get('total_bruto', '')))
+
+    xml = xml[:ini_mod] + nuevas_filas + nueva_pal + nueva_total + xml[fin_tot:]
+
+    # Fechas de faena / produccion / vencimiento (rango unico por envio)
+    trs2 = get_trs(xml)
+    xml = _reemplazar_fechas(xml, trs2, datos.get('fecha_faena', ''), datos.get('fecha_produccion', ''),
+                              datos.get('fecha_vencimiento', ''), fmt_fecha_al)
+
+    # Transporte (terrestre) - patente principal + segunda chapa (del
+    # provisorio, no del remito). Formato XXX-NNN si matchea 3 letras + 3 numeros.
+    def _formatear_patente(p):
+        p = (p or '').upper().replace('-', '').replace(' ', '')
+        m = re.match(r'^([A-Z]{3})(\d{3})$', p)
+        return (m.group(1) + '-' + m.group(2)) if m else p
+
+    patente1 = datos.get('patente1') or datos.get('camion') or ''
+    patente2 = datos.get('patente2') or ''
+    if patente1:
+        camion_chapa = _formatear_patente(patente1) + ('/' + patente2 if patente2 else '')
+        xml = _reemplazar_tras_label(xml, r'CAMION CHAPA:', camion_chapa)
+    else:
+        alertas.append('Patente de camión no encontrada - completar manualmente')
+
+    # Precinto SENASA y AFIP combinados en un solo campo con guion
+    precinto_senasa = datos.get('precinto_senasa', '') or ''
+    precinto_afip = datos.get('precinto_afip', '') or ''
+    if precinto_senasa or precinto_afip:
+        precinto_combinado = precinto_senasa + (' – ' + precinto_afip if precinto_afip else '')
+        xml = _reemplazar_tras_label(xml, r'Número de precinto:', precinto_combinado)
+    else:
+        alertas.append('Precinto no encontrado - completar manualmente')
+
+    # Fecha de emision (pie del certificado) - la ultima fecha dd/mm/yyyy del documento
+    fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
+    todas_fechas = list(re.finditer(r'\d{2}/\d{2}/\d{4}', xml))
+    if todas_fechas:
+        ultima = todas_fechas[-1]
+        xml = xml[:ultima.start()] + fecha_emi + xml[ultima.end():]
+
+    return xml, alertas
+
+
+# ── PERU MENUDENCIAS ─────────────────────────────────────────────────────
+# Independiente de Peru Enfriado: es MARITIMO (buque, no camion), precinto en
+# UN solo campo (no combinado), numeros en formato argentino (punto miles,
+# coma decimal - no ingles como enfriado), y la fila de pallets no lleva
+# parentesis alrededor de los KGS.
+
+def _gen_peru_menudencias(xml, datos):
+    alertas = []
+    trs = get_trs(xml)
+
+    _, _, _, header_idx = _get_fila_por_contenido(xml, trs, 'Descripción de la mercadería')
+    primera_idx = (header_idx + 1) if header_idx is not None else 5
+
+    fila_pal, ini_pal, fin_pal, idx_pal = _get_fila_por_contenido(xml, trs, 'ACONDICIONAD')
+
+    _, _, _, total_idx = _get_fila_por_contenido(xml, trs, 'Total / es')
+    if total_idx is None:
+        total_idx = primera_idx + 5
+
+    fila_modelo, ini_mod, _ = get_fila_xml(xml, trs, primera_idx)
+    fila_total, ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx)
+
+    nuevas_filas = ''
+    for prod in datos.get('productos', []):
+        nombre = armar_nombre_peru(prod, MAPA_PERU_MENUDENCIAS)
+        nueva = fila_modelo
+        nueva = _reemplazar_celda(nueva, 0, str(prod.get('cajas', '')))
+        nueva = _reemplazar_celda(nueva, 1, nombre)
+        nueva = _reemplazar_celda(nueva, 6, formatear_miles(prod.get('neto', '')))
+        nueva = _reemplazar_celda(nueva, 7, formatear_miles(prod.get('bruto', '')))
+        nuevas_filas += nueva
+
+    pallets = datos.get('pallets', '') or ''
+    kg_pallets = datos.get('kg_pallets', '') or ''
+    nueva_pal = fila_pal or ''
+    if fila_pal and pallets:
+        nueva_pal = re.sub(r'(ACONDICIONADA EN\s*)\d+', r'\g<1>' + str(pallets), nueva_pal, count=1)
+        if kg_pallets:
+            kg_fmt = formatear_miles(kg_pallets)
+            nueva_pal = re.sub(r'[\d\.,]+((?:\s|<[^>]+>)*?KGS)', kg_fmt + r'\1', nueva_pal, count=1)
+
+    nueva_total = fila_total
+    nueva_total = _reemplazar_celda(nueva_total, 0, str(datos.get('total_cajas', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 2, formatear_miles(datos.get('total_neto', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 3, formatear_miles(datos.get('total_bruto', '')))
+
+    xml = xml[:ini_mod] + nuevas_filas + nueva_pal + nueva_total + xml[fin_tot:]
+
+    # Fechas de faena / produccion / vencimiento (rango unico por envio)
+    trs2 = get_trs(xml)
+    xml = _reemplazar_fechas(xml, trs2, datos.get('fecha_faena', ''), datos.get('fecha_produccion', ''),
+                              datos.get('fecha_vencimiento', ''), fmt_fecha_al)
+
+    # Transporte (buque)
+    transporte = datos.get('transporte', '') or ''
+    if transporte: xml = xml.replace('SANTA VANESSA', transporte)
+
+    # Contenedor
+    contenedor = datos.get('contenedor', '') or ''
+    if contenedor: xml = xml.replace('HLBU6152556', contenedor)
+    if not contenedor: alertas.append('Contenedor no encontrado - completar manualmente')
+
+    # Precinto (un solo campo - se usa el de AFIP)
+    precinto = datos.get('precinto_afip') or datos.get('precinto_senasa') or ''
+    if precinto: xml = xml.replace('BAH79560', precinto)
+    if not precinto: alertas.append('Precinto no encontrado - completar manualmente')
 
     # Fecha de emision (pie del certificado) - la ultima fecha dd/mm/yyyy del documento
     fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
