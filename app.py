@@ -973,6 +973,23 @@ def _reemplazar_tras_label(xml, patron_label, valor_nuevo, count=1, flags=re.IGN
     return patron.sub(lambda m: m.group(1) + valor_nuevo, xml, count=count)
 
 
+def _reemplazar_ocurrencias_por_indice(xml, patron_label, valores, flags=re.IGNORECASE):
+    """Como _reemplazar_tras_label, pero para cuando el MISMO label aparece
+    varias veces con valores distintos (ej. 'Número de precinto:' en español
+    y de nuevo en portugues, con el precinto SENASA y el AFIP respectivamente).
+    'valores' es la lista de reemplazos en el orden en que aparecen las
+    ocurrencias (None = no tocar esa ocurrencia). Se procesa de atras para
+    adelante para no invalidar las posiciones ya encontradas."""
+    patron = re.compile(r'(' + patron_label + r'(?:\s|<[^>]+>)*?)([A-Za-z0-9][^<]*)', flags)
+    matches = list(patron.finditer(xml))
+    for i in reversed(range(min(len(matches), len(valores)))):
+        if not valores[i]:
+            continue
+        m = matches[i]
+        xml = xml[:m.start()] + m.group(1) + valores[i] + xml[m.end():]
+    return xml
+
+
 def _reemplazar_celda(xml_fila, celda_idx, nuevo_texto):
     celda_starts = [m.start() for m in re.finditer(r'<w:tc>', xml_fila)]
     celda_ends   = [m.start() for m in re.finditer(r'</w:tc>', xml_fila)]
@@ -2378,18 +2395,19 @@ def _gen_brasil(xml, datos):
     xml = _set_temperatura_singapur(xml, es_congelado, tipo_via='maritimo')
 
     # Transporte - es por camion (frontera terrestre), usa la patente del
-    # camion/acoplado del remito en vez de Buque/Aerolinea
+    # camion/acoplado del remito en vez de Buque/Aerolinea - anclado al label
     camion_acoplado = datos.get('camion_acoplado', '') or datos.get('camion', '') or ''
     if camion_acoplado:
-        xml = xml.replace('TPW4B00/ TPN4D18', camion_acoplado)
+        xml = _reemplazar_tras_label(xml, r'CAMION CHAPA:', camion_acoplado)
     else:
         alertas.append('Patente de camión/acoplado no encontrada - completar manualmente')
 
-    # Precinto SENASA y AFIP van en 2 campos separados (no combinados)
+    # Precinto SENASA y AFIP van en 2 campos separados con el MISMO label
+    # repetido (ES y PT) - se reemplaza por orden de aparicion, no por texto
+    # literal (cada plantilla trae numeros de ejemplo distintos)
     precinto_senasa = datos.get('precinto_senasa', '') or ''
-    if precinto_senasa: xml = xml.replace('0042221/28', precinto_senasa, 1)
     precinto_afip = datos.get('precinto_afip', '') or ''
-    if precinto_afip: xml = xml.replace('DM77867/68', precinto_afip, 1)
+    xml = _reemplazar_ocurrencias_por_indice(xml, r'Número de precinto:', [precinto_senasa, precinto_afip])
     if not (precinto_senasa or precinto_afip):
         alertas.append('Precinto no encontrado - completar manualmente')
 
