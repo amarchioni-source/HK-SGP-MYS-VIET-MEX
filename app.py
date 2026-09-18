@@ -202,12 +202,56 @@ def generar():
                 usados_cod.add(cand[0]['contramarca'])
                 usados_idx.add(i)
 
+        # Cruce por peso neto (nivel 2): el peso de cada linea del provisorio
+        # es casi siempre unico por producto, incluso cuando dos productos
+        # comparten la misma descripcion (ej. mismo "LOMO SC GF AA MB2+" pero
+        # distinta cantidad de kilos). El neto del OCR viene con coma decimal
+        # (ej. "816,00"); se normaliza a punto para comparar contra el neto
+        # ya parseado del remito.
+        def _normalizar_neto(valor):
+            if not valor:
+                return None
+            try:
+                return '{:.2f}'.format(float(str(valor).replace('.', '').replace(',', '.')))
+            except (TypeError, ValueError):
+                return None
+
+        por_neto = {}
+        for l in lineas_usa:
+            neto_norm = _normalizar_neto(l.get('neto'))
+            if neto_norm:
+                por_neto.setdefault(neto_norm, []).append(l)
+        for i, prod in enumerate(productos_list):
+            if i in usados_idx:
+                continue
+            try:
+                neto_prod_norm = '{:.2f}'.format(float(prod.get('neto') or 0))
+            except (TypeError, ValueError):
+                continue
+            cand = [l for l in por_neto.get(neto_prod_norm, []) if l['contramarca'] not in usados_cod]
+            if len(cand) == 1:
+                prod['contramarca'] = cand[0]['contramarca']
+                usados_cod.add(cand[0]['contramarca'])
+                usados_idx.add(i)
+
         for l in lineas_usa:
             if l['contramarca'] in usados_cod:
                 continue
             texto_l = l.get('texto', '')
+            # Contar cuantos productos AUN SIN ASIGNAR comparten el mismo
+            # nombre_es (ej. varios "LOMO SC" identicos por no tener rango de
+            # peso que los distinga) - un nombre duplicado no puede resolverse
+            # por texto, y ademas NO debe bloquear el cruce de otro producto
+            # que si tiene un nombre especifico y distinguible.
+            nombres_restantes = [(productos_list[i].get('nombre_es') or '').upper()
+                                  for i in range(len(productos_list)) if i not in usados_idx]
+            conteo_nombres = {}
+            for n in nombres_restantes:
+                conteo_nombres[n] = conteo_nombres.get(n, 0) + 1
             cand_idx = [i for i, p in enumerate(productos_list)
-                        if i not in usados_idx and (p.get('nombre_es') or '').upper() in texto_l]
+                        if i not in usados_idx
+                        and (p.get('nombre_es') or '').upper() in texto_l
+                        and conteo_nombres.get((p.get('nombre_es') or '').upper(), 0) == 1]
             if len(cand_idx) == 1:
                 i = cand_idx[0]
                 productos_list[i]['contramarca'] = l['contramarca']
@@ -685,13 +729,22 @@ def leer_sanitario_provisorio(pdf_bytes):
     # linea NO se usa (viene poco confiable del OCR) - se usa la del piqueo por
     # producto en su lugar; esto solo ancla el match a filas de producto reales
     # (evita matchear el resumen "CONTRAMARCA:C208/C209/...").
+    # Tambien captura el peso neto/bruto que sigue despues del parentesis de
+    # fecha - son casi siempre unicos por producto y sirven para desambiguar
+    # cuando el nombre y la cantidad de cajas no alcanzan (ver el cruce en 3+1
+    # niveles en el route /generar). El label de fecha varia entre "Fecha de
+    # Faena" y la forma abreviada "F. faena" (ej. para menudencias).
     lineas_usa = []
     patron_linea = re.compile(
-        r'^\s*(\d+)?([^\n]*?)-\s*[A-Za-z0-9](\d{2,4})\s*\(\s*Fecha de Faena',
+        r'^\s*(\d+)?([^\n]*?)-\s*[A-Za-z0-9](\d{2,4})\s*\(\s*(?:Fecha\s*de\s*Faena|F\.\s*faena)\s*:[^)]*\)'
+        r'(?:[ \t]*([\d.,]+)(?:[ \t]*\|?[ \t]*([\d.,]+))?)?',
         re.IGNORECASE | re.MULTILINE
     )
     for m in patron_linea.finditer(texto):
-        lineas_usa.append({'cajas': m.group(1), 'texto': (m.group(2) or '').upper(), 'contramarca': 'C' + m.group(3)})
+        lineas_usa.append({
+            'cajas': m.group(1), 'texto': (m.group(2) or '').upper(), 'contramarca': 'C' + m.group(3),
+            'neto': m.group(4), 'bruto': m.group(5),
+        })
     datos['lineas_usa'] = lineas_usa
 
     return datos
