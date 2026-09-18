@@ -274,6 +274,7 @@ def generar():
             'filipinas':         'filipinas',
             'ecuador':           'ecuador',
             'egipto':            'egipto',
+            'dubai':             'dubai',
             'brasil':            'brasil',
             'peruenfriado':      ('peru', 'enfriado'),
             'perumenudencias':   ('peru', 'menudencia'),
@@ -1025,6 +1026,40 @@ MAPA_EGIPTO = {
 CLAVES_EGIPTO = sorted(MAPA_EGIPTO.keys(), key=len, reverse=True)
 
 
+# ── NOMBRES ESPECIFICOS DUBAI (por codigo, nombre bilingue de una sola linea) ──
+MAPA_DUBAI = {
+    'CD160208': {'es': 'BIFE ANCHO CON HUESO', 'en': 'TOMAHAWK'},
+    'CD155309': {'es': 'BIFE ANCHO CON HUESO CON LOMO', 'en': 'SHORTLOINS'},
+    'CD219023': {'es': 'ENTRAÑA FINA', 'en': 'ANGUS BONELESS BEEF OUTSIDE SKIRT'},
+    'CD209167': {'es': 'TAPA DE CUADRIL', 'en': 'RUMP CAP'},
+    'CD220018': {'es': 'VACIO', 'en': 'ANGUS BONELESS BEEF WHOLE FLANK'},
+    'CD220625': {'es': 'BIFE DE VACIO GRANDE', 'en': 'FLAP MEAT'},
+    'CD214093': {'es': 'BIFE ANGOSTO', 'en': 'STRIPLOIN'},
+    'CD216150': {'es': 'LOMO S/ CORDON', 'en': 'TENDERLOIN CHAIN OFF'},
+    'CD216151': {'es': 'LOMO S/ CORDON', 'en': 'TENDERLOIN CHAIN OFF'},
+    'CD216152': {'es': 'LOMO S/ CORDON', 'en': 'TENDERLOIN CHAIN OFF'},
+    'CD224889': {'es': 'BIFE ANCHO SIN TAPA', 'en': 'RIBEYE'},
+    'CD217005': {'es': 'CABEZA DE LOMO', 'en': 'TENDERLOIN BUTT'},
+}
+
+
+def armar_nombre_dubai(prod):
+    """Arma el nombre bilingue de una sola linea 'ES/ EN' para Dubai, buscando
+    por codigo en MAPA_DUBAI. Si el codigo no esta todavia mapeado, cae a la
+    descripcion limpia del remito + traduccion generica en vez de dejar la
+    celda vacia."""
+    codigo = (prod.get('codigo', '') or '').strip().upper()
+    info = MAPA_DUBAI.get(codigo)
+    if info:
+        return info['es'] + '/ ' + info['en']
+    desc_original = prod.get('desc_original', '')
+    es = (desc_original.split('(')[0].strip().upper() if desc_original else '') or (prod.get('nombre_es', '') or '').strip().upper()
+    en = (buscar_nombre_en(es) or '').strip().upper()
+    if en:
+        return es + '/ ' + en
+    return es
+
+
 def armar_nombre_egipto(prod):
     """Arma el nombre bilingue de una sola linea 'ES / EN' para Egipto. Si el
     corte no esta todavia en MAPA_EGIPTO, cae a la descripcion completa del
@@ -1556,6 +1591,8 @@ def generar_sanitario(docx_bytes, datos, tipo_via, destino):
         xml, al = _gen_ecuador(xml, datos)
     elif destino == 'egipto':
         xml, al = _gen_egipto(xml, datos)
+    elif destino == 'dubai':
+        xml, al = _gen_dubai(xml, datos)
     elif destino == 'brasil':
         xml, al = _gen_brasil(xml, datos)
     elif destino == 'peruenfriado':
@@ -2961,6 +2998,96 @@ def _gen_peru_congelado(xml, datos):
     if todas_fechas:
         ultima = todas_fechas[-1]
         xml = xml[:ultima.start()] + fecha_emi + xml[ultima.end():]
+
+    return xml, alertas
+
+
+# ── DUBAI (EMIRATOS ARABES) ──────────────────────────────────────────────
+# Nombre bilingue de una sola linea (por codigo, tabla propia). Numeros en
+# formato simple (sin separador de miles). El peso de los pallets va en su
+# PROPIA celda (columna bruto) en vez de dentro del texto, y SI se suma al
+# bruto total (a diferencia de Egipto/Brasil/Ecuador). Aereo, sin camion.
+# Fecha de emision en formato especial "YYYY (año-year) MM (mes-month) DD
+# (dia-Day)" en vez de dd/mm/yyyy.
+
+def _gen_dubai(xml, datos):
+    alertas = []
+    trs = get_trs(xml)
+
+    _, _, _, header_idx = _get_fila_por_contenido(xml, trs, 'Description of goods')
+    primera_idx = (header_idx + 1) if header_idx is not None else 5
+
+    fila_pal, ini_pal, fin_pal, idx_pal = _get_fila_por_contenido(xml, trs, 'ACONDICIONAD')
+
+    _, _, _, total_idx = _get_fila_por_contenido(xml, trs, 'Total / es')
+    if total_idx is None:
+        total_idx = primera_idx + 8
+
+    fila_modelo, ini_mod, _ = get_fila_xml(xml, trs, primera_idx)
+    fila_total, ini_tot, fin_tot = get_fila_xml(xml, trs, total_idx)
+
+    nuevas_filas = ''
+    for prod in datos.get('productos', []):
+        nombre_bi = armar_nombre_dubai(prod)
+        nueva = fila_modelo
+        nueva = _reemplazar_celda(nueva, 0, str(prod.get('cajas', '')))
+        nueva = _reemplazar_celda(nueva, 1, nombre_bi)
+        nueva = _reemplazar_celda(nueva, 6, str(prod.get('neto', '')))
+        nueva = _reemplazar_celda(nueva, 7, str(prod.get('bruto', '')))
+        nuevas_filas += nueva
+
+    pallets = datos.get('pallets', '') or ''
+    kg_pallets = datos.get('kg_pallets', '') or ''
+    nueva_pal = fila_pal or ''
+    if fila_pal and pallets:
+        nueva_pal = re.sub(r'(ACONDICIONADA EN\s*)\d+', r'\g<1>' + str(pallets), nueva_pal, count=1)
+        nueva_pal = re.sub(r'(ACONDITIONED IN\s*)\d+', r'\g<1>' + str(pallets), nueva_pal, count=1, flags=re.IGNORECASE)
+        if kg_pallets:
+            nueva_pal = _reemplazar_celda(nueva_pal, 7, kg_pallets)
+
+    # El bruto total SI suma el peso de los pallets (a diferencia de otros
+    # destinos donde el remito ya trae el bruto completo)
+    total_bruto = datos.get('total_bruto', '')
+    if kg_pallets:
+        try:
+            total_bruto = '{:.2f}'.format(float(total_bruto) + float(kg_pallets))
+        except (TypeError, ValueError):
+            pass
+
+    nueva_total = fila_total
+    nueva_total = _reemplazar_celda(nueva_total, 0, str(datos.get('total_cajas', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 2, str(datos.get('total_neto', '')))
+    nueva_total = _reemplazar_celda(nueva_total, 3, total_bruto)
+
+    xml = xml[:ini_mod] + nuevas_filas + nueva_pal + nueva_total + xml[fin_tot:]
+
+    # Fechas de faena / produccion / vencimiento (rango unico por envio)
+    trs2 = get_trs(xml)
+    xml = _reemplazar_fechas(xml, trs2, datos.get('fecha_faena', ''), datos.get('fecha_produccion', ''),
+                              datos.get('fecha_vencimiento', ''), fmt_fecha_al)
+
+    # Transporte (vuelo)
+    transporte = datos.get('transporte', '') or ''
+    if transporte: xml = xml.replace('EK9921', transporte)
+
+    # Contenedor y precinto - anclados por label (por defecto vienen en guiones, aereo)
+    contenedor = datos.get('contenedor', '') or ''
+    if contenedor:
+        xml = _reemplazar_tras_label(xml, r'Container\(s\) number:', contenedor)
+    precinto = datos.get('precinto_afip') or datos.get('precinto_senasa') or ''
+    if precinto:
+        xml = _reemplazar_tras_label(xml, r'Seal number:', precinto)
+
+    # Fecha de emision - formato especial "YYYY (año-year) MM (mes-month) DD (dia-Day)"
+    fecha_emi = datos.get('fecha_emision') or datetime.datetime.now().strftime('%d/%m/%Y')
+    m_femi = re.match(r'(\d{2})/(\d{2})/(\d{4})', fecha_emi)
+    if m_femi:
+        dd, mm, yyyy = m_femi.groups()
+        nuevo_texto = yyyy + ' (año – year) ' + mm + ' (mes – month) ' + dd + ' (día – Day)'
+        xml = re.sub(
+            r'\d{4}\s*\([^)]*\)\s*\d{2}\s*\([^)]*\)\s*\d{2}\s*\([^)]*\)',
+            nuevo_texto, xml, count=1
+        )
 
     return xml, alertas
 
