@@ -449,8 +449,17 @@ def leer_reporte(file, shipment):
             hdr = row; hdr_idx = i; break
     if hdr is None: hdr = rows[0]
     def col(keys):
+        # Preferir coincidencia EXACTA del nombre de columna antes que por
+        # substring - la planilla real tiene columnas como "Shipment
+        # Description" que tambien contienen la palabra "Description" y
+        # confundian la busqueda con la columna real de descripcion del
+        # producto.
         for i, h in enumerate(hdr):
-            if h and any(k.lower() in str(h).lower() for k in keys): return i
+            if h and str(h).strip().lower() in [k.lower() for k in keys]:
+                return i
+        for i, h in enumerate(hdr):
+            if h and any(k.lower() in str(h).lower() for k in keys):
+                return i
         return None
     c_ship = col(['Shipment No', 'Shipment'])
     c_code = col(['Code'])
