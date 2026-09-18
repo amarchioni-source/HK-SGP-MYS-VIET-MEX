@@ -746,7 +746,8 @@ def leer_sanitario_provisorio(pdf_bytes):
     # Faena" y la forma abreviada "F. faena" (ej. para menudencias).
     lineas_usa = []
     patron_linea = re.compile(
-        r'^\s*(\d+)?([^\n]*?)-\s*[A-Za-z0-9](\d{2,4})\s*\(\s*(?:Fecha\s*de\s*Faena|F\.\s*faena)\s*:[^)]*\)'
+        r'^[\s|_\[\]]*(\d+)?([^\n]*?)-\s*[A-Za-z0-9](\d{2,4})\s*\(\s*(?:Fecha\s*de\s*Faena|F\.\s*faena)\s*:\s*'
+        r'\d{2}/\d{2}/\d{4}(?:\s*al\s*\d{2}/\d{2}/\d{4})?\s*\)?'
         r'(?:[ \t]*([\d.,]+)(?:[ \t]*\|?[ \t]*([\d.,]+))?)?',
         re.IGNORECASE | re.MULTILINE
     )
