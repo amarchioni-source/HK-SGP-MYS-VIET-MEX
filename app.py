@@ -505,6 +505,21 @@ def expandir_contramarcas(campo):
     return ['C' + str(n) for n in numeros]
 
 
+def _alertas_fechas_faltantes(datos):
+    """Devuelve alertas para las fechas de faena/produccion/vencimiento que no
+    se pudieron leer. Sin esto, un valor faltante deja silenciosamente el de
+    ejemplo que trae la plantilla, y el certificado sale con una fecha
+    incorrecta sin que nadie lo note."""
+    alertas = []
+    for etiqueta, clave in (('faena', 'fecha_faena'),
+                            ('producción', 'fecha_produccion'),
+                            ('vencimiento', 'fecha_vencimiento')):
+        if not datos.get(clave):
+            alertas.append('Fecha de ' + etiqueta + ' no encontrada en el provisorio - '
+                           'el documento conserva la fecha de ejemplo de la plantilla, verificar')
+    return alertas
+
+
 def _es_numero(s):
     """True si s es un numero parseable (ej. '2504.00'), usado para validar
     filas de producto del remito antes de aceptarlas."""
@@ -704,15 +719,29 @@ def leer_sanitario_provisorio(pdf_bytes):
     # cuando hay que separar un envio en 2 documentos (ej. Peru
     # congelado+menudencias) y cada documento necesita el rango de SU propio
     # provisorio, no el agregado de todo el piqueo.
-    m_faena_p = re.search(r'^\s*Faena\s*:\s*(\d{2}/\d{2}/\d{4})\s*al\s*(\d{2}/\d{2}/\d{4})', texto, re.IGNORECASE | re.MULTILINE)
-    if m_faena_p:
-        datos['fecha_faena_prov'] = m_faena_p.group(1) + ' al ' + m_faena_p.group(2)
-    m_prod_p = re.search(r'^\s*(?:1\.11\s*Fecha\s*)?Producci[oó]n\s*:\s*(\d{2}/\d{2}/\d{4})\s*al\s*(\d{2}/\d{2}/\d{4})', texto, re.IGNORECASE | re.MULTILINE)
-    if m_prod_p:
-        datos['fecha_produccion_prov'] = m_prod_p.group(1) + ' al ' + m_prod_p.group(2)
-    m_venc_p = re.search(r'^\s*Vencimiento\s*:\s*(\d{2}/\d{2}/\d{4})\s*al\s*(\d{2}/\d{2}/\d{4})', texto, re.IGNORECASE | re.MULTILINE)
-    if m_venc_p:
-        datos['fecha_vencimiento_prov'] = m_venc_p.group(1) + ' al ' + m_venc_p.group(2)
+    #
+    # El OCR agrega ruido en dos lugares: en el prefijo de numeracion de la
+    # etiqueta ("1.11 Fecha Produccion" sale como "l.11 ..." o "111 ...") y
+    # entre los dos puntos y la fecha (ej. un guion suelto). Por eso la
+    # etiqueta de Produccion no depende del prefijo (la palabra "Produccion:"
+    # aparece solo en el resumen), y entre ":" y la fecha se admiten hasta 5
+    # caracteres que no sean digitos.
+    ruido_inicio = r'^[\s|_\[\]—–\-.,]*'
+    rango_fechas = r'[^\d\n]{0,5}(\d{2}/\d{2}/\d{4})\s*al\s*(\d{2}/\d{2}/\d{4})'
+
+    def _rango_resumen(patron):
+        m = re.search(patron, texto, re.IGNORECASE | re.MULTILINE)
+        return (m.group(1) + ' al ' + m.group(2)) if m else None
+
+    f_faena_p = _rango_resumen(ruido_inicio + r'Faena\s*:' + rango_fechas)
+    if f_faena_p:
+        datos['fecha_faena_prov'] = f_faena_p
+    f_prod_p = _rango_resumen(r'Producci.n\s*:' + rango_fechas)
+    if f_prod_p:
+        datos['fecha_produccion_prov'] = f_prod_p
+    f_venc_p = _rango_resumen(ruido_inicio + r'Vencimiento\s*:' + rango_fechas)
+    if f_venc_p:
+        datos['fecha_vencimiento_prov'] = f_venc_p
 
     # Patente de transporte (a veces con 2 chapas, ej. Peru: "Patente Transporte:
     # ADK931 / Z1V990") - el remito a veces solo trae la primera. El texto
@@ -2896,6 +2925,7 @@ def _gen_peru_menudencias(xml, datos):
     xml = xml[:ini_mod] + nuevas_filas + nueva_pal + nueva_total + xml[fin_tot:]
 
     # Fechas de faena / produccion / vencimiento (rango unico por envio)
+    alertas.extend(_alertas_fechas_faltantes(datos))
     trs2 = get_trs(xml)
     xml = _reemplazar_fechas(xml, trs2, datos.get('fecha_faena', ''), datos.get('fecha_produccion', ''),
                               datos.get('fecha_vencimiento', ''), fmt_fecha_al)
@@ -2975,6 +3005,7 @@ def _gen_peru_congelado(xml, datos):
 
     # Fechas de faena / produccion / vencimiento (rango unico por envio, o por
     # el subconjunto de codigos si viene de una separacion carne/menudencia)
+    alertas.extend(_alertas_fechas_faltantes(datos))
     trs2 = get_trs(xml)
     xml = _reemplazar_fechas(xml, trs2, datos.get('fecha_faena', ''), datos.get('fecha_produccion', ''),
                               datos.get('fecha_vencimiento', ''), fmt_fecha_al)
