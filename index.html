@@ -236,16 +236,16 @@
     </div>
 
     <div class="form-group">
-      <label>Piqueo <span class="badge badge-xlsx">XLSX</span></label>
-      <span class="hint">Ej: PIQUEO_9500_PEDIDO_213593.xlsx</span>
+      <label>Romaneo <span class="badge badge-xlsx">XLSX</span></label>
+      <span class="hint">Ej: Romaneo_0017-00017475.xlsx</span>
       <div class="file-drop">
-        <input type="file" name="piqueo" accept=".xlsx" onchange="mostrarNombre(this,'nombre-piqueo','fila-piqueo')"/>
+        <input type="file" name="romaneo" accept=".xlsx" onchange="mostrarNombre(this,'nombre-romaneo','fila-romaneo')"/>
         <div class="icon">📋</div>
         <div class="label"><strong>Clic para elegir</strong> o arrastrar aquí</div>
       </div>
-      <div class="filename-row" id="fila-piqueo" style="display:none;">
-        <span class="filename" id="nombre-piqueo"></span>
-        <button type="button" class="btn-quitar" onclick="quitarArchivo('piqueo','nombre-piqueo','fila-piqueo')">✕ Quitar</button>
+      <div class="filename-row" id="fila-romaneo" style="display:none;">
+        <span class="filename" id="nombre-romaneo"></span>
+        <button type="button" class="btn-quitar" onclick="quitarArchivo('romaneo','nombre-romaneo','fila-romaneo')">✕ Quitar</button>
       </div>
     </div>
 
@@ -323,7 +323,7 @@
 
   <hr class="divider"/>
   <div class="instrucciones">
-    <strong>Cómo usar:</strong> seleccioná el destino y vía, subí el piqueo, el sanitario provisorio,
+    <strong>Cómo usar:</strong> seleccioná el destino y vía, subí el romaneo, el sanitario provisorio,
     el remito y el Reporte DOC, ingresá el shipment y generá.
   </div>
 </div>
@@ -360,12 +360,12 @@
     const shipment    = document.getElementById('shipment_no').value.trim();
     const destino_via = document.getElementById('destino_via').value;
     const [destino, tipo_via] = destino_via ? destino_via.split('_') : ['', ''];
-    const piqueo    = this.piqueo.files[0];
+    const romaneo    = this.romaneo.files[0];
     const sanitario = this.sanitario.files[0];
     const remito    = this.remito.files[0];
     const reporte   = this.reporte.files[0];
 
-    if (!shipment || !destino_via || !piqueo || !sanitario || !remito || !reporte) {
+    if (!shipment || !destino_via || !romaneo || !sanitario || !remito || !reporte) {
       mostrarError(['Completá todos los campos y subí los 4 archivos.']);
       return;
     }

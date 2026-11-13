@@ -27,7 +27,7 @@ def index():
 @app.route('/generar', methods=['POST'])
 def generar():
     try:
-        piqueo_f     = request.files.get('piqueo')
+        romaneo_f    = request.files.get('romaneo')
         reporte_f    = request.files.get('reporte')
         sanitario_f  = request.files.get('sanitario')
         sanitario2_f = request.files.get('sanitario2')  # opcional - algunos destinos (ej. Ecuador) reparten carne/menudencias en 2 certificados separados que van juntos en un solo sanitario final
@@ -37,7 +37,7 @@ def generar():
         destino      = request.form.get('destino', 'malasia').strip()
 
         errores = []
-        if not piqueo_f:    errores.append('Falta el Piqueo (.xlsx)')
+        if not romaneo_f:   errores.append('Falta el Romaneo (.xlsx)')
         if not reporte_f:   errores.append('Falta el Reporte DOC (.xlsx)')
         if not sanitario_f: errores.append('Falta el Sanitario Provisorio (PDF)')
         if not remito_f:    errores.append('Falta el Remito (PDF)')
@@ -48,7 +48,7 @@ def generar():
         if errores:
             return jsonify({'ok': False, 'errores': errores}), 400
 
-        datos_piqueo = leer_piqueo(piqueo_f)
+        datos_piqueo = leer_romaneo(romaneo_f)
         reporte      = leer_reporte(reporte_f, shipment)
         datos_remito = leer_remito(remito_f.read())
 
@@ -324,9 +324,19 @@ def generar():
         return jsonify({'ok': False, 'errores': [str(e), traceback.format_exc()]}), 500
 
 
-# ── PIQUEO ───────────────────────────────────────────────────────────────────
+# ── ROMANEO ──────────────────────────────────────────────────────────────────
+# Romaneo = "Detalle de cargas remito ..." (una fila por caja). Columnas usadas:
+#   Cod Prod, Pallet, Kill Date (faena), Prod Date (produccion), Exp. Date (vencimiento)
+# Reemplaza al piqueo: son las mismas cajas y las mismas fechas (verificado caja
+# por caja contra el piqueo de la venta 10119). Si se sube un piqueo viejo
+# (Fecha F / Fecha P / Fecha Ven) tambien se lee.
 
-def leer_piqueo(file):
+COLS_FECHA_FAENA = ['Kill Date', 'Fecha F']
+COLS_FECHA_PROD  = ['Prod Date', 'Fecha P']
+COLS_FECHA_VENC  = ['Exp. Date', 'Exp Date', 'Fecha Ven', 'Vencimiento']
+
+
+def leer_romaneo(file):
     wb = openpyxl.load_workbook(file, data_only=True)
 
     # Buscar entre TODAS las hojas la que tenga headers de producto (Cod Prod/Codigo).
@@ -341,7 +351,7 @@ def leer_piqueo(file):
             if not row: continue
             valores = [str(v or '').strip() for v in row]
             tiene_cod   = any(v in ('Cod Prod', 'Codigo') for v in valores)
-            tiene_fecha = any(v in ('Fecha F', 'Fecha P', 'Fecha Ven') for v in valores)
+            tiene_fecha = any(v in COLS_FECHA_FAENA + COLS_FECHA_PROD + COLS_FECHA_VENC for v in valores)
             if tiene_cod and tiene_fecha:
                 ws, rows, hdr_idx = sheet, rows_tmp, i
                 break
@@ -354,7 +364,7 @@ def leer_piqueo(file):
         rows = list(ws.iter_rows(values_only=True))
         hdr_idx = 0
         for i, row in enumerate(rows[:5]):
-            if row and any(str(v or '').strip() in ('Cod Prod', 'Producto', 'Fecha F', 'Fecha P') for v in row):
+            if row and any(str(v or '').strip() in ['Cod Prod', 'Producto'] + COLS_FECHA_FAENA + COLS_FECHA_PROD for v in row):
                 hdr_idx = i
                 break
 
@@ -367,9 +377,9 @@ def leer_piqueo(file):
         return None
 
     c_cod     = col_idx(['Cod Prod', 'Codigo'])
-    c_fecha_f = col_idx(['Fecha F'])
-    c_fecha_p = col_idx(['Fecha P'])
-    c_fecha_v = col_idx(['Fecha Ven', 'Vencimiento'])
+    c_fecha_f = col_idx(COLS_FECHA_FAENA)
+    c_fecha_p = col_idx(COLS_FECHA_PROD)
+    c_fecha_v = col_idx(COLS_FECHA_VENC)
     c_pallet  = col_idx(['Pallet'])
 
     faena_min = faena_max = None
@@ -2035,7 +2045,7 @@ def _gen_usa_wclass(xml, datos):
     f_prod  = datos.get('fecha_produccion', '') or ''
     f_venc  = datos.get('fecha_vencimiento', '') or ''
     if not f_prod:
-        alertas.append('Fecha de producción no encontrada en el piqueo - completar manualmente')
+        alertas.append('Fecha de producción no encontrada en el romaneo - completar manualmente')
     if not f_venc:
         alertas.append('Fecha límite de conservación no encontrada - completar manualmente')
 
@@ -2330,7 +2340,7 @@ def _gen_alle_processing(xml, datos):
     f_prod  = datos.get('fecha_produccion', '') or ''
     f_venc  = datos.get('fecha_vencimiento', '') or ''
     if not f_faena: alertas.append('Fecha de faena no encontrada - completar manualmente')
-    if not f_prod:  alertas.append('Fecha de producción no encontrada en el piqueo - completar manualmente')
+    if not f_prod:  alertas.append('Fecha de producción no encontrada en el romaneo - completar manualmente')
     if not f_venc:  alertas.append('Fecha límite de conservación no encontrada - completar manualmente')
 
     peso_neto_kg  = str(datos.get('total_neto', '') or '')
