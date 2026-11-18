@@ -616,15 +616,18 @@ def leer_remito(pdf_bytes):
         else:
             datos['transporte'] = transport
             datos['tipo_transporte'] = 'maritimo'
-    m_cont = re.search(r'CONTAINER[:\s]*([A-Z]{4}\d{6,7}-?\d?)', texto, re.IGNORECASE)
-    contenedor = m_cont.group(1).strip() if m_cont else None
+    # El remito puede traer el contenedor pegado ('HLBU9920088', 'HLBU992008-8')
+    # o con espacio entre letras y numeros ('HLBU 992008-8', venta 10023) - se
+    # aceptan espacios opcionales y se normaliza quitandolos.
+    m_cont = re.search(r'CONTAINER[:\s]*([A-Z]{4}[ \t]?\d{6,7}(?:[ \t]?-[ \t]?\d)?)', texto, re.IGNORECASE)
+    contenedor = re.sub(r'[ \t]', '', m_cont.group(1)).upper() if m_cont else None
     if not contenedor:
         # Algunos PDF separan la etiqueta "CONTAINER:" de su valor al extraer
         # el texto (el numero queda flotando en otra parte del documento) -
         # como respaldo, se busca un codigo con forma de contenedor suelto.
-        m_cont_suelto = re.search(r'\b([A-Z]{4}\d{7})\b', texto)
+        m_cont_suelto = re.search(r'\b([A-Z]{4}[ \t]?\d{7})\b', texto)
         if m_cont_suelto:
-            contenedor = m_cont_suelto.group(1)
+            contenedor = re.sub(r'[ \t]', '', m_cont_suelto.group(1))
     if contenedor and '-' not in contenedor:
         # Formato estandar ISO 6346: 4 letras + 6 digitos de serie + guion + 1 digito verificador
         m_iso = re.match(r'^([A-Z]{4}\d{6})(\d)$', contenedor)
