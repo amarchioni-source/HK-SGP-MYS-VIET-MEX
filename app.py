@@ -381,6 +381,7 @@ def leer_romaneo(file):
     c_fecha_p = col_idx(COLS_FECHA_PROD)
     c_fecha_v = col_idx(COLS_FECHA_VENC)
     c_pallet  = col_idx(['Pallet'])
+    c_desc    = col_idx(['Producto'])
 
     faena_min = faena_max = None
     prod_min  = prod_max  = None
@@ -395,6 +396,14 @@ def leer_romaneo(file):
         cod = row[c_cod] if c_cod is not None and c_cod < len(row) else None
         if not cod: continue
         cod = str(cod).strip()
+
+        # El romaneo (a diferencia del piqueo) puede traer filas de insumos que
+        # no son cajas de carne, ej. 'IF015 PALLETS 1000X1200 EXP. CARGAS', con
+        # Prod Date = dia de la carga y Kill Date = 0. Si se cuentan, estiran
+        # los rangos de produccion/lote/vencimiento (caso venta 10265-5).
+        desc = str(row[c_desc] or '') if c_desc is not None and c_desc < len(row) else ''
+        if cod.upper().startswith('IF') or 'PALLET' in desc.upper():
+            continue
 
         if c_pallet is not None and c_pallet < len(row) and row[c_pallet]:
             pallets_set.add(str(row[c_pallet]))
